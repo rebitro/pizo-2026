@@ -1,0 +1,117 @@
+{
+  "theme": {
+    "name": "Cinematic Youthful Glassmorphism",
+    "mode": "dark",
+    "archetype": "Luxury / Performance Pro (Archetype 5 + Vibrant Play)",
+    "description": "A highly attractive, premium dark mode design relying on cinematic glassmorphism. Uses deep obsidian backgrounds, crystal clear frosted glass panels, and vibrant Coral/Hot Orange and Pirate Gold to pop without resorting to neon."
+  },
+  "colors": {
+    "background": {
+      "base": "#050505",
+      "surface": "#121212",
+      "glass": "rgba(255, 255, 255, 0.03)",
+      "glass_hover": "rgba(255, 255, 255, 0.06)"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "disabled": "#52525B"
+    },
+    "brand": {
+      "primary": "#D4AF37",
+      "accent": "#FF5E3A",
+      "reward": "#FACC15"
+    },
+    "borders": {
+      "glass": "rgba(255, 255, 255, 0.08)",
+      "solid": "#27272A"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk",
+      "body": "Manrope"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl lg:text-7xl font-black tracking-tighter leading-[1.1]",
+      "h2": "text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight leading-tight",
+      "h3": "text-xl sm:text-2xl font-bold tracking-tight",
+      "body": "text-base sm:text-lg leading-relaxed text-zinc-300",
+      "labels": "text-xs font-bold uppercase tracking-[0.2em] text-zinc-400"
+    }
+  },
+  "layout": {
+    "spacing": "Generous spacing. Use p-8, p-12 for bento grids.",
+    "grid": "Bento Grid (TETRIS Grid) for features. Asymmetrical layouts.",
+    "surfaces": "Crystal Glassmorphism: backdrop-blur-xl or 2xl, bg-white/[0.03], border border-white/10. Drop soft ambient shadow.",
+    "alignment": "Left-align for text and data. Center hero text if necessary. Follow optical alignment."
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#FF5E3A] hover:bg-[#ff7b5c] text-white font-bold px-8 py-4 rounded-full transition-transform hover:-translate-y-1 shadow-[0_0_20px_rgba(255,94,58,0.3)]",
+      "secondary": "bg-white/5 border border-white/10 backdrop-blur-md hover:bg-white/10 text-white font-semibold px-8 py-4 rounded-full transition-all hover:-translate-y-1"
+    },
+    "cards": "Glassmorphic panels with subtle glowing blobs underneath. Hover states should brighten the border to border-white/20.",
+    "forms": "Dark inputs, bg-black/50 with 1px border-white/10, focus state with #FF5E3A ring.",
+    "navigation": "Sticky, high-opacity glassmorphism (bg-[#050505]/60 backdrop-blur-2xl border-b border-white/5). Logo left, links center, CTA right."
+  },
+  "motion": {
+    "libraries": [
+      "framer-motion",
+      "lucide-react",
+      "clsx",
+      "tailwind-merge"
+    ],
+    "interactions": "Smooth transitions for hover (transform 0.2s ease). Elements fade and slide up on enter (staggered)."
+  },
+  "assets": {
+    "logo": "https://customer-assets.emergentagent.com/job_5138dde7-fb31-42b6-b878-d3f8be1c4d5f/artifacts/xbraui72_517247711_17859671220445839_4953795569973148132_n.jpg",
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1511512578047-dfb367046420?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwzfHx5b3V0aCUyMGdhbWluZyUyMGxvdW5nZSUyMGRhcmt8ZW58MHx8fHwxNzgyMjA0MjE4fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Gaming room with arcade machines. Dark, purple/blue lighting. Use as a background with heavy black/50 overlay.",
+        "category": "hero_background"
+      },
+      {
+        "url": "https://images.pexels.com/photos/14266493/pexels-photo-14266493.jpeg",
+        "description": "Electrifying atmosphere at an esports event.",
+        "category": "events_carousel"
+      },
+      {
+        "url": "https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg",
+        "description": "A brightly lit soccer field at night.",
+        "category": "venues_turf"
+      },
+      {
+        "url": "https://images.pexels.com/photos/5055749/pexels-photo-5055749.jpeg",
+        "description": "Three friends playing pool in a relaxed indoor setting.",
+        "category": "venues_billiards"
+      },
+      {
+        "url": "https://images.pexels.com/photos/9072386/pexels-photo-9072386.jpeg",
+        "description": "Illuminated gaming room with colorful screens.",
+        "category": "venues_gaming"
+      },
+      {
+        "url": "https://images.pexels.com/photos/15864904/pexels-photo-15864904.jpeg",
+        "description": "A lively crowd enjoying a vibrant night performance.",
+        "category": "creator_club"
+      }
+    ]
+  },
+  "testing": {
+    "requirement": "All interactive elements MUST have data-testid attributes (kebab-case, role-based). Examples: data-testid='hero-join-button', data-testid='nav-login-link'."
+  },
+  "instructions_to_main_agent": [
+    "Design MUST be full dark mode. Do not use pure white backgrounds anywhere.",
+    "Use pure HTML + Tailwind for the marketing layouts (Hero, Features, Events, Creator Club). Do not use Shadcn card component for these creative layouts.",
+    "Use customized Shadcn UI components for the Dashboards, Forms, and Subscription cards.",
+    "Implement glassmorphism using 'bg-white/5 backdrop-blur-xl border border-white/10' style classes on top of dark gradients.",
+    "Do NOT use neon styling. The bright Coral (#FF5E3A) is your accent pop against the deep black.",
+    "Inject the gold pirate ship logo consistently in the header, footer, and maybe as an accent mark in the hero.",
+    "Set dark mode as default and primary. Ensure text has high contrast (pure white text on dark backgrounds, zinc-300 for paragraphs).",
+    "Use framer-motion for bento grid staggered reveals, parallax, and hover effects.",
+    "For the hero background, apply a gradient overlay (e.g., bg-black/70 to transparent) so the image is visible but text remains 100% readable.",
+    "Bento grids should use wide gaps (gap-6 to gap-8) and mixed span logic (The Hero, The Tall, The Square) as per the TETRIS mode rules."
+  ]
+}
