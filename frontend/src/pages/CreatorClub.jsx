@@ -118,7 +118,18 @@ export default function CreatorClub() {
           <Trophy className="mx-auto text-[var(--pizo-gold)]" size={32}/>
           <h2 className="font-display text-3xl md:text-5xl font-black mt-4">Got the spark?</h2>
           <p className="text-zinc-300 mt-3 max-w-xl mx-auto">Drop your reel, claim a spot, and the next monthly crown could be yours.</p>
-          <button className="mt-6 px-7 py-3 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow" data-testid="creator-apply-button">
+          <button onClick={async ()=>{
+            if (!window.confirm("Join Creator Club? You'll get a referral code instantly.")) return;
+            const name = prompt("Your name?"); if (!name) return;
+            const phone = prompt("Phone or email?"); if (!phone) return;
+            const instagram = prompt("Instagram handle?") || "";
+            const youtube = prompt("YouTube channel?") || "";
+            try {
+              const r = await (await import("@/lib/api")).api.post("/creators/join", { name, phone, instagram, youtube, bio:"" });
+              alert(`Welcome! Your referral code: ${r.data.referral_code}`);
+              window.location.reload();
+            } catch(e) { alert("Join failed - sign in first"); }
+          }} className="mt-6 px-7 py-3 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow" data-testid="creator-apply-button">
             Apply to the Crew
           </button>
         </div>

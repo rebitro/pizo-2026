@@ -20,8 +20,15 @@ export default function OwnerDashboard() {
   const [form, setForm] = useState({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, image:"https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", description:"", amenities:"Floodlights,Parking" });
 
   const load = async () => {
-    try { const r = await api.get("/bookings/owner"); setData(r.data); }
-    catch (err) { console.error("Owner load failed:", err); }
+    try {
+      const r = await api.get("/owner/analytics");
+      setData({
+        venues: r.data.venues, bookings: r.data.bookings,
+        revenue: r.data.gross_revenue, footfall: r.data.footfall,
+        commission: r.data.commission_amount, net_payout: r.data.net_payout,
+        commission_pct: r.data.commission_pct, payout_schedule: r.data.payout_schedule,
+      });
+    } catch (err) { console.error("Owner load failed:", err); }
   };
   useEffect(() => { if (user) load(); }, [user]);
 
@@ -111,9 +118,15 @@ export default function OwnerDashboard() {
       <div className="grid md:grid-cols-4 gap-5 mt-10">
         <Stat label="VENUES" value={data.venues.length} icon={<Building/>}/>
         <Stat label="FOOTFALL" value={data.footfall} icon={<Users/>}/>
-        <Stat label="REVENUE" value={`₹${(data.revenue + 12500).toLocaleString()}`} icon={<IndianRupee/>}/>
+        <Stat label="REVENUE" value={`₹${(data.revenue || 0).toLocaleString()}`} icon={<IndianRupee/>}/>
         <Stat label="BOOKINGS" value={data.bookings.length} icon={<Calendar/>}/>
       </div>
+      {data.payout_schedule && (
+        <div className="mt-4 glass rounded-2xl px-5 py-3 text-xs text-zinc-300 flex flex-wrap items-center justify-between gap-2">
+          <span>💸 {data.commission_pct || 9}% PIZO commission • Net payout: <b className="text-[var(--pizo-gold-soft)]">₹{(data.net_payout||0).toLocaleString()}</b></span>
+          <span className="text-zinc-500">⏱ {data.payout_schedule}</span>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-5 mt-6">
         <div className="glass rounded-3xl p-6">

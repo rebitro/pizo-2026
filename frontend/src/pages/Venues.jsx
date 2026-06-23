@@ -47,7 +47,7 @@ export default function Venues() {
   const confirmBooking = async () => {
     if (!user) { setAuthOpen(true); return; }
     try {
-      const coupons = [coupon1, coupon2].filter(Boolean);
+      const coupons = ["FIRST10", coupon1].filter(Boolean);
       const { data } = await api.post("/bookings", { venue_id: book.venue_id, date, slot, num_players: numPlayers, coupons });
       setConfirmed(data);
       toast.success(`Booked ${book.name} • ₹${data.per_player}/player`);

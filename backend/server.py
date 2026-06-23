@@ -766,6 +766,44 @@ async def contact(body: ContactIn):
 async def root():
     return {"message": "PIZO API ahoy! ⚓"}
 
+# ---------- Admin (token-gated) ----------
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "pizo-admin-2026")
+
+def require_admin(x_admin_token: Optional[str] = Header(None)):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(401, "Admin token required")
+    return True
+
+@api_router.get("/admin/overview")
+async def admin_overview(_: bool = Depends(require_admin)):
+    return {
+        "users": await db.users.count_documents({}),
+        "venues": await db.venues.count_documents({}),
+        "verified_venues": await db.venues.count_documents({"verified": True}),
+        "bookings": await db.bookings.count_documents({}),
+        "subscriptions": await db.subscriptions.count_documents({"status":"active"}),
+        "contacts": await db.contacts.count_documents({}),
+        "creators": await db.creators.count_documents({}),
+    }
+
+@api_router.get("/admin/venues")
+async def admin_venues(_: bool = Depends(require_admin)):
+    return await db.venues.find({}, {"_id": 0}).to_list(500)
+
+@api_router.post("/admin/venues/{venue_id}/verify")
+async def admin_verify(venue_id: str, _: bool = Depends(require_admin)):
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": True}})
+    return {"ok": True}
+
+@api_router.post("/admin/venues/{venue_id}/unverify")
+async def admin_unverify(venue_id: str, _: bool = Depends(require_admin)):
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": False}})
+    return {"ok": True}
+
+@api_router.get("/admin/contacts")
+async def admin_contacts(_: bool = Depends(require_admin)):
+    return await db.contacts.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
 # ---------- Seed ----------
 async def seed_data():
     if await db.venues.count_documents({}) == 0:

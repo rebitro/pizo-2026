@@ -17,6 +17,7 @@ import OwnerDashboard from "@/pages/OwnerDashboard";
 import AuthCallback from "@/pages/AuthCallback";
 import FindPirate from "@/pages/FindPirate";
 import Merch from "@/pages/Merch";
+import Admin from "@/pages/Admin";
 
 function AppRouter() {
   const location = useLocation();
@@ -39,6 +40,7 @@ function AppRouter() {
         <Route path="/merch" element={<Merch />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/owner" element={<OwnerDashboard />} />
+        <Route path="/admin" element={<Admin />} />
       </Routes>
       <Footer />
     </>
