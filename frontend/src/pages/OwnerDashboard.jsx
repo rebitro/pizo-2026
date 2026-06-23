@@ -20,7 +20,8 @@ export default function OwnerDashboard() {
   const [form, setForm] = useState({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, image:"https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", description:"", amenities:"Floodlights,Parking" });
 
   const load = async () => {
-    try { const r = await api.get("/bookings/owner"); setData(r.data); } catch {}
+    try { const r = await api.get("/bookings/owner"); setData(r.data); }
+    catch (err) { console.error("Owner load failed:", err); }
   };
   useEffect(() => { if (user) load(); }, [user]);
 
