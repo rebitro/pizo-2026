@@ -2,10 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid } from "recharts";
-import { Building, IndianRupee, Users, Calendar, Plus, X, Lock, Copy, Check, Anchor } from "lucide-react";
+import { Building, IndianRupee, Users, Calendar, Plus, X, Lock, Copy, Check, Anchor, Award } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import CaptainsCard from "@/components/CaptainsCard";
 
 const CATS = ["turf","gaming","billiards","pickleball"];
 const ONBOARD_FEE = 149;
@@ -18,6 +19,7 @@ export default function OwnerDashboard() {
   const [onboardPaying, setOnboardPaying] = useState(false);
   const [onboardRef, setOnboardRef] = useState(null);
   const [form, setForm] = useState({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, image:"https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", description:"", amenities:"Floodlights,Parking" });
+  const [cardVenue, setCardVenue] = useState(null);
 
   const load = async () => {
     try {
@@ -168,6 +170,10 @@ export default function OwnerDashboard() {
                   <div className="font-display font-bold">{v.name}</div>
                   <div className="text-xs text-zinc-400">{v.city} • {v.category}</div>
                   <div className="text-xs gold-text font-bebas text-xl mt-2">₹{v.price_per_hour}/hr</div>
+                  <button onClick={()=>setCardVenue(v)} data-testid={`captains-card-${v.venue_id}`}
+                    className="mt-3 w-full py-2 rounded-full bg-[var(--pizo-gold)]/15 border border-[var(--pizo-gold)]/40 text-[var(--pizo-gold-soft)] text-xs font-bold flex items-center justify-center gap-1">
+                    <Award size={12}/> Captain's Card
+                  </button>
                 </div>
               </motion.div>
             ))}
@@ -255,6 +261,7 @@ export default function OwnerDashboard() {
           </motion.div>
         </div>
       )}
+      {cardVenue && <CaptainsCard venue={cardVenue} onClose={()=>setCardVenue(null)}/>}
     </main>
   );
 }
