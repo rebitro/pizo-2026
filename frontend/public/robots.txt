@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://pizo.app/sitemap.xml
