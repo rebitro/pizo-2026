@@ -96,7 +96,3 @@ function Field({ icon, label, type = "text", value, onChange, testid }) {
     </div>
   );
 }
- </div>
-    </div>
-  );
-}

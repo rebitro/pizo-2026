@@ -128,13 +128,18 @@ export default function FindPirate() {
         </div>
       )}
       <AuthModal open={authOpen} onClose={()=>setAuthOpen(false)}/>
-    </main>
-  );
-}
-   <input value={contact} onChange={e=>setContact(e.target.value)} placeholder="Phone or email"
+
+      {joinId && (
+        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur flex items-center justify-center p-4" onClick={()=>setJoinId(null)}>
+          <motion.div initial={{scale:0.95,y:20}} animate={{scale:1,y:0}} onClick={(e)=>e.stopPropagation()}
+            className="w-full max-w-sm glass-strong rounded-3xl p-6">
+            <h3 className="font-display text-xl font-bold">Join the crew</h3>
+            <p className="text-zinc-400 text-xs mt-1">Captain needs your contact to coordinate.</p>
+            <input value={contact} onChange={e=>setContact(e.target.value)} placeholder="Phone or email"
               data-testid="pirate-contact-input"
               className="w-full mt-4 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[var(--pizo-coral)]"/>
-            <button onClick={confirmJoin} data-testid="pirate-join-confirm" className="w-full mt-4 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow">Confirm Join</button>
+            <button onClick={confirmJoin} data-testid="pirate-join-confirm"
+              className="w-full mt-4 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow">Confirm Join</button>
           </motion.div>
         </div>
       )}
