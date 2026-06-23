@@ -53,6 +53,7 @@ class User(BaseModel):
     role: str = "user"
     picture: Optional[str] = None
     auth_provider: str = "jwt"  # jwt or google
+    owner_onboarded: bool = False
     created_at: str
 
 class VenueIn(BaseModel):
@@ -288,7 +289,39 @@ async def logout(request: Request, response: Response):
     response.delete_cookie("session_token", path="/")
     return {"ok": True}
 
-# ---------- Venues ----------
+# ---------- Owners ----------
+OWNER_ONBOARD_FEE = 149
+
+class OwnerOnboardIn(BaseModel):
+    upi_id: str
+
+@api_router.post("/owners/onboard")
+async def owner_onboard(body: OwnerOnboardIn, user: User = Depends(require_user)):
+    if user.owner_onboarded:
+        u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "password_hash": 0})
+        return {"already_onboarded": True, "user": u, "amount": OWNER_ONBOARD_FEE}
+    upi_ref = f"PIZO-OWN-{uuid.uuid4().hex[:8].upper()}"
+    await db.owner_payments.insert_one({
+        "payment_id": f"op_{uuid.uuid4().hex[:10]}",
+        "user_id": user.user_id,
+        "amount": OWNER_ONBOARD_FEE,
+        "upi_id": body.upi_id,
+        "upi_ref": upi_ref,
+        "status": "paid",
+        "created_at": iso(now_utc()),
+    })
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"owner_onboarded": True, "role": "owner"}},
+    )
+    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "password_hash": 0})
+    return {"ok": True, "amount": OWNER_ONBOARD_FEE, "upi_ref": upi_ref, "user": u}
+
+@api_router.get("/owners/status")
+async def owner_status(user: User = Depends(require_user)):
+    return {"owner_onboarded": user.owner_onboarded, "role": user.role, "fee": OWNER_ONBOARD_FEE}
+
+
 @api_router.get("/venues", response_model=List[Venue])
 async def list_venues(category: Optional[str] = None, city: Optional[str] = None):
     q = {}
@@ -301,6 +334,8 @@ async def list_venues(category: Optional[str] = None, city: Optional[str] = None
 
 @api_router.post("/venues", response_model=Venue)
 async def create_venue(body: VenueIn, user: User = Depends(require_user)):
+    if user.role == "owner" and not user.owner_onboarded:
+        raise HTTPException(status_code=402, detail="Owner onboarding fee (₹149) required before listing venues.")
     venue_id = f"venue_{uuid.uuid4().hex[:10]}"
     doc = body.model_dump()
     doc.update({"venue_id": venue_id, "created_at": iso(now_utc()), "owner_id": user.user_id})

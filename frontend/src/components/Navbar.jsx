@@ -7,6 +7,7 @@ import { LOGO_URL } from "@/lib/api";
 import AuthModal from "@/components/AuthModal";
 
 const links = [
+  { to: "/", label: "Home" },
   { to: "/features", label: "Features" },
   { to: "/venues", label: "Venues" },
   { to: "/events", label: "Events" },
@@ -53,7 +54,7 @@ export default function Navbar() {
                 to={l.to}
                 data-testid={`nav-${l.label.toLowerCase()}-link`}
                 className={({ isActive }) =>
-                  `px-4 py-2 text-sm rounded-full transition-all ${
+                  `px-3 py-2 text-sm rounded-full transition-all ${
                     isActive ? "text-white bg-white/10" : "text-zinc-300 hover:text-white hover:bg-white/5"
                   }`
                 }
