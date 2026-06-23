@@ -25,6 +25,11 @@ export function AuthProvider({ children }) {
       setLoading(false);
       return;
     }
+    // Skip anonymous /auth/me probe if no JWT token & no cookie hint
+    if (!localStorage.getItem("pizo_token") && !document.cookie.includes("session_token")) {
+      setLoading(false);
+      return;
+    }
     checkAuth();
   }, [checkAuth]);
 
