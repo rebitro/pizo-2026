@@ -10,8 +10,10 @@ const links = [
   { to: "/", label: "Home" },
   { to: "/features", label: "Features" },
   { to: "/venues", label: "Venues" },
+  { to: "/find-pirate", label: "Find Pirate" },
   { to: "/events", label: "Events" },
   { to: "/creators", label: "Creators" },
+  { to: "/merch", label: "Merch" },
   { to: "/plans", label: "Plans" },
   { to: "/contact", label: "Contact" },
 ];

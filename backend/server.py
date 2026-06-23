@@ -58,7 +58,7 @@ class User(BaseModel):
 
 class VenueIn(BaseModel):
     name: str
-    category: str  # turf, billiards, gaming, pickleball
+    category: str
     city: str
     address: str
     price_per_hour: int
@@ -67,6 +67,7 @@ class VenueIn(BaseModel):
     amenities: List[str] = []
     description: str = ""
     owner_id: Optional[str] = None
+    verified: bool = False
 
 class Venue(VenueIn):
     venue_id: str
@@ -74,8 +75,10 @@ class Venue(VenueIn):
 
 class BookingIn(BaseModel):
     venue_id: str
-    date: str  # YYYY-MM-DD
-    slot: str  # e.g. "6:00 PM - 7:00 PM"
+    date: str
+    slot: str
+    num_players: Optional[int] = 1
+    coupons: Optional[List[str]] = []
 
 class Booking(BaseModel):
     booking_id: str
@@ -85,6 +88,14 @@ class Booking(BaseModel):
     date: str
     slot: str
     status: str = "confirmed"
+    num_players: int = 1
+    base_price: int = 0
+    discount_pct: int = 0
+    final_total: int = 0
+    per_player: int = 0
+    applied_coupons: List[str] = []
+    share_token: str = ""
+    checked_in: bool = False
     created_at: str
 
 class EventIn(BaseModel):
@@ -356,7 +367,54 @@ async def create_booking(body: BookingIn, user: User = Depends(require_user)):
     venue = await db.venues.find_one({"venue_id": body.venue_id}, {"_id": 0})
     if not venue:
         raise HTTPException(status_code=404, detail="Venue not found")
+    # SLOT LOCK: prevent double-booking
+    existing = await db.bookings.find_one({"venue_id": body.venue_id, "date": body.date, "slot": body.slot, "status": {"$ne": "cancelled"}})
+    if existing:
+        raise HTTPException(status_code=409, detail="Slot already booked. Pick another time.")
+
+    # PREMIUM early-access on weekends (Fri/Sat/Sun) — non-premium can only book within 6 days
+    try:
+        from datetime import date as _d
+        bdate = _d.fromisoformat(body.date)
+        days_ahead = (bdate - now_utc().date()).days
+        if bdate.weekday() >= 4 and days_ahead > 6:
+            sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": "premium"})
+            if not sub:
+                raise HTTPException(status_code=403, detail="Premium Pass required to book weekend slots more than 6 days ahead.")
+    except HTTPException: raise
+    except Exception: pass
+
+    base_price = int(venue.get("price_per_hour", 0))
+    num_players = max(1, int(getattr(body, "num_players", 1) or 1))
+
+    # Apply coupons (max 2)
+    coupons = list(getattr(body, "coupons", []) or [])[:2]
+    discount_pct = 0
+    applied = []
+    user_booking_count = await db.bookings.count_documents({"user_id": user.user_id})
+    for code in coupons:
+        c = code.upper().strip()
+        if c == "FIRST10" and user_booking_count == 0 and base_price > 100:
+            discount_pct += 10; applied.append("FIRST10")
+        elif c == "LOYAL15" and user_booking_count >= 5:
+            discount_pct += 15; applied.append("LOYAL15")
+        elif c.startswith("SCRATCH-"):
+            sc = await db.scratch_cards.find_one({"code": c, "user_id": user.user_id, "used": False})
+            if sc:
+                discount_pct += int(sc["discount_pct"])
+                applied.append(c)
+                await db.scratch_cards.update_one({"_id": sc["_id"]}, {"$set": {"used": True}})
+        elif c.startswith("CR-"):
+            creator = await db.creators.find_one({"referral_code": c})
+            if creator:
+                discount_pct += 5; applied.append(c)
+                await db.creators.update_one({"creator_id": creator["creator_id"]}, {"$inc": {"engagement": 5}})
+    discount_pct = min(discount_pct, 40)
+    final_total = int(base_price * (100 - discount_pct) / 100)
+    per_player = int(round(final_total / num_players))
+
     booking_id = f"bk_{uuid.uuid4().hex[:10]}"
+    share_token = uuid.uuid4().hex[:8]
     doc = {
         "booking_id": booking_id,
         "user_id": user.user_id,
@@ -365,11 +423,33 @@ async def create_booking(body: BookingIn, user: User = Depends(require_user)):
         "date": body.date,
         "slot": body.slot,
         "status": "confirmed",
+        "num_players": num_players,
+        "base_price": base_price,
+        "discount_pct": discount_pct,
+        "final_total": final_total,
+        "per_player": per_player,
+        "applied_coupons": applied,
+        "share_token": share_token,
+        "checked_in": False,
         "created_at": iso(now_utc()),
     }
     await db.bookings.insert_one(doc)
+
+    # SCRATCH REWARD on every 5th booking
+    new_count = user_booking_count + 1
+    scratch = None
+    if new_count % 5 == 0:
+        import random
+        pct = random.choice([10, 12, 15, 18, 20])
+        code = f"SCRATCH-{uuid.uuid4().hex[:6].upper()}"
+        await db.scratch_cards.insert_one({
+            "code": code, "user_id": user.user_id, "discount_pct": pct,
+            "used": False, "revealed": False, "created_at": iso(now_utc()),
+        })
+        scratch = {"code": code, "discount_pct": pct}
+
     doc.pop("_id", None)
-    return doc
+    return Booking(**{k: v for k, v in doc.items() if k in Booking.model_fields})
 
 @api_router.get("/bookings/me", response_model=List[Booking])
 async def my_bookings(user: User = Depends(require_user)):
@@ -425,6 +505,182 @@ async def create_creator(body: CreatorIn, user: User = Depends(require_user)):
     await db.creators.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+# ---------- Slot availability ----------
+SLOTS_ALL = ["6:00 AM - 7:00 AM","8:00 AM - 9:00 AM","11:00 AM - 12:00 PM","4:00 PM - 5:00 PM","6:00 PM - 7:00 PM","8:00 PM - 9:00 PM"]
+
+@api_router.get("/venues/{venue_id}/availability")
+async def availability(venue_id: str, date: str):
+    booked = await db.bookings.find({"venue_id": venue_id, "date": date, "status": {"$ne": "cancelled"}}, {"_id": 0, "slot": 1}).to_list(50)
+    booked_slots = [b["slot"] for b in booked]
+    return {"date": date, "slots": [{"slot": s, "available": s not in booked_slots} for s in SLOTS_ALL]}
+
+# ---------- Scratch cards ----------
+@api_router.get("/scratch/me")
+async def my_scratch(user: User = Depends(require_user)):
+    cards = await db.scratch_cards.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return cards
+
+@api_router.post("/scratch/{code}/reveal")
+async def reveal_scratch(code: str, user: User = Depends(require_user)):
+    sc = await db.scratch_cards.find_one({"code": code, "user_id": user.user_id})
+    if not sc: raise HTTPException(404, "Card not found")
+    await db.scratch_cards.update_one({"code": code}, {"$set": {"revealed": True}})
+    return {"code": code, "discount_pct": sc["discount_pct"], "used": sc.get("used", False)}
+
+# ---------- Find a Pirate ----------
+class PirateAlertIn(BaseModel):
+    sport: str
+    location: str
+    price_per_player: int
+    date: str
+    time: str
+    players_needed: int
+    note: str = ""
+
+@api_router.get("/pirates/alerts")
+async def list_alerts():
+    docs = await db.pirate_alerts.find({"status": "open"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return docs
+
+@api_router.post("/pirates/alerts")
+async def create_alert(body: PirateAlertIn, user: User = Depends(require_user)):
+    doc = {**body.model_dump(), "alert_id": f"pa_{uuid.uuid4().hex[:10]}",
+           "user_id": user.user_id, "user_name": user.name, "status": "open",
+           "responders": [], "created_at": iso(now_utc())}
+    await db.pirate_alerts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.post("/pirates/alerts/{alert_id}/join")
+async def join_alert(alert_id: str, user: User = Depends(require_user)):
+    await db.pirate_alerts.update_one({"alert_id": alert_id}, {"$addToSet": {"responders": {"user_id": user.user_id, "name": user.name}}})
+    return {"ok": True}
+
+# ---------- Merch (Premium-only catalog) ----------
+MERCH = [
+    {"id":"m1","name":"Pirate Crew Tee","price":899,"image":"https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600","category":"tee"},
+    {"id":"m2","name":"Gold Anchor Cap","price":699,"image":"https://images.unsplash.com/photo-1588850561407-ed78c282e89b?w=600","category":"cap"},
+    {"id":"m3","name":"Captain Hoodie","price":1799,"image":"https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=600","category":"hoodie"},
+    {"id":"m4","name":"Skull Sticker Pack","price":199,"image":"https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=600","category":"sticker"},
+    {"id":"m5","name":"PIZO Tote Bag","price":499,"image":"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=600","category":"bag"},
+    {"id":"m6","name":"Crew Wristband","price":299,"image":"https://images.unsplash.com/photo-1622445275576-721325763afe?w=600","category":"accessory"},
+]
+
+@api_router.get("/merch")
+async def list_merch(user: User = Depends(require_user)):
+    sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": {"$in": ["premium","family"]}})
+    is_premium = bool(sub)
+    items = []
+    for m in MERCH:
+        m2 = dict(m)
+        if is_premium:
+            m2["original_price"] = m["price"]
+            m2["price"] = int(m["price"] * 0.9)
+            m2["discount_pct"] = 10
+        items.append(m2)
+    return {"is_premium": is_premium, "items": items}
+
+# ---------- Creator join + referral ----------
+class CreatorJoinIn(BaseModel):
+    name: str
+    phone: str
+    instagram: str
+    youtube: str
+    bio: str = ""
+    category: str = "creator"
+
+@api_router.post("/creators/join")
+async def creator_join(body: CreatorJoinIn, user: User = Depends(require_user)):
+    existing = await db.creators.find_one({"user_id": user.user_id})
+    if existing:
+        return {"already_joined": True, "referral_code": existing.get("referral_code")}
+    referral = f"CR-{uuid.uuid4().hex[:6].upper()}"
+    doc = {
+        "creator_id": f"cr_{uuid.uuid4().hex[:10]}",
+        "user_id": user.user_id,
+        "name": body.name, "handle": body.instagram, "phone": body.phone,
+        "instagram": body.instagram, "youtube": body.youtube,
+        "avatar": user.picture or f"https://i.pravatar.cc/300?u={user.user_id}",
+        "bio": body.bio, "category": body.category,
+        "engagement": 0, "consistency": 0, "quality": 0,
+        "points": 0, "badges": ["Rookie"], "rank": 0,
+        "referral_code": referral,
+        "video_links": [],
+        "created_at": iso(now_utc()),
+    }
+    await db.creators.insert_one(doc)
+    return {"ok": True, "referral_code": referral}
+
+class CreatorVideoIn(BaseModel):
+    url: str
+    views: int = 0
+
+@api_router.post("/creators/video")
+async def creator_video(body: CreatorVideoIn, user: User = Depends(require_user)):
+    creator = await db.creators.find_one({"user_id": user.user_id})
+    if not creator: raise HTTPException(403, "Join Creator Club first")
+    pts = (body.views // 1000) * 2
+    await db.creators.update_one(
+        {"creator_id": creator["creator_id"]},
+        {"$push": {"video_links": {"url": body.url, "views": body.views, "added_at": iso(now_utc())}},
+         "$inc": {"engagement": pts}}
+    )
+    return {"ok": True, "points_earned": pts}
+
+# ---------- Owner: slot management + staff + analytics ----------
+COMMISSION_PCT = 9
+PAYOUT_SCHEDULE = "Every Monday at 11:00 AM IST (T+1 week settlement)"
+
+@api_router.get("/owner/analytics")
+async def owner_analytics(user: User = Depends(require_user)):
+    venues = await db.venues.find({"owner_id": user.user_id}, {"_id": 0}).to_list(500)
+    vids = [v["venue_id"] for v in venues]
+    bookings = await db.bookings.find({"venue_id": {"$in": vids}}, {"_id": 0}).to_list(2000)
+    gross = sum(b.get("final_total", 0) for b in bookings)
+    commission = int(gross * COMMISSION_PCT / 100)
+    payout = gross - commission
+    return {
+        "venues": venues, "bookings": bookings,
+        "footfall": sum(b.get("num_players", 1) for b in bookings),
+        "gross_revenue": gross, "commission_pct": COMMISSION_PCT,
+        "commission_amount": commission, "net_payout": payout,
+        "payout_schedule": PAYOUT_SCHEDULE,
+    }
+
+class StaffIn(BaseModel):
+    name: str
+
+@api_router.post("/owner/staff")
+async def create_staff(body: StaffIn, user: User = Depends(require_user)):
+    token = f"STAFF-{uuid.uuid4().hex[:16]}"
+    doc = {"staff_id": f"st_{uuid.uuid4().hex[:8]}", "owner_id": user.user_id,
+           "name": body.name, "scan_token": token, "created_at": iso(now_utc())}
+    await db.staff.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/owner/staff")
+async def list_staff(user: User = Depends(require_user)):
+    docs = await db.staff.find({"owner_id": user.user_id}, {"_id": 0}).to_list(50)
+    return docs
+
+@api_router.post("/staff/scan")
+async def staff_scan(payload: dict):
+    token = payload.get("scan_token"); booking_id = payload.get("booking_id")
+    st = await db.staff.find_one({"scan_token": token})
+    if not st: raise HTTPException(401, "Invalid staff token")
+    bk = await db.bookings.find_one({"booking_id": booking_id})
+    if not bk: raise HTTPException(404, "Booking not found")
+    await db.bookings.update_one({"booking_id": booking_id}, {"$set": {"checked_in": True}})
+    return {"ok": True, "booking_id": booking_id, "guest": bk["user_id"]}
+
+# ---------- Verify venue (admin/owner toggle) ----------
+@api_router.post("/venues/{venue_id}/verify")
+async def verify_venue(venue_id: str, user: User = Depends(require_user)):
+    # Demo: any onboarded owner of the venue can request/toggle verified=True
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": True}})
+    return {"ok": True}
 
 # ---------- Subscriptions (mock UPI) ----------
 PLAN_CATALOG = {

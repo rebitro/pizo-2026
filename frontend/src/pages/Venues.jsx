@@ -18,7 +18,19 @@ export default function Venues() {
   const [book, setBook] = useState(null);
   const [date, setDate] = useState(new Date(Date.now()+86400000).toISOString().slice(0,10));
   const [slot, setSlot] = useState(SLOTS[4]);
+  const [numPlayers, setNumPlayers] = useState(2);
+  const [coupon1, setCoupon1] = useState("");
+  const [coupon2, setCoupon2] = useState("");
+  const [bookedSlots, setBookedSlots] = useState([]);
   const [authOpen, setAuthOpen] = useState(false);
+  const [confirmed, setConfirmed] = useState(null);
+
+  useEffect(() => {
+    if (!book) return;
+    api.get(`/venues/${book.venue_id}/availability`, { params: { date }})
+      .then(r => setBookedSlots(r.data.slots.filter(s=>!s.available).map(s=>s.slot)))
+      .catch(()=>setBookedSlots([]));
+  }, [book, date]);
 
   const load = async () => {
     const params = {};
@@ -35,9 +47,11 @@ export default function Venues() {
   const confirmBooking = async () => {
     if (!user) { setAuthOpen(true); return; }
     try {
-      await api.post("/bookings", { venue_id: book.venue_id, date, slot });
-      toast.success(`Booked ${book.name} on ${date}`);
-      setBook(null);
+      const coupons = [coupon1, coupon2].filter(Boolean);
+      const { data } = await api.post("/bookings", { venue_id: book.venue_id, date, slot, num_players: numPlayers, coupons });
+      setConfirmed(data);
+      toast.success(`Booked ${book.name} • ₹${data.per_player}/player`);
+      setBook(null); setCoupon1(""); setCoupon2(""); setNumPlayers(2);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Booking failed");
     }
@@ -83,6 +97,7 @@ export default function Venues() {
             <div className="relative aspect-[16/11] overflow-hidden">
               <img src={v.image} className="w-full h-full object-cover group-hover:scale-110 transition duration-700" alt={v.name}/>
               <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-[10px] tracking-widest text-[var(--pizo-gold)]">{v.category.toUpperCase()}</div>
+              {v.verified && <div className="absolute bottom-3 left-3 px-2 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/40 backdrop-blur text-[10px] text-emerald-200">✓ PIRATES VERIFIED</div>}
               <div className="absolute top-3 right-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-xs flex items-center gap-1"><Star size={12} className="text-[var(--pizo-gold)] fill-[var(--pizo-gold)]"/> {v.rating}</div>
             </div>
             <div className="p-5">
@@ -127,12 +142,36 @@ export default function Venues() {
             <div className="mt-4">
               <label className="text-[10px] tracking-[0.3em] text-zinc-400">SLOT</label>
               <div className="mt-2 grid grid-cols-2 gap-2">
-                {SLOTS.map(s => (
-                  <button key={s} onClick={()=>setSlot(s)} data-testid={`slot-${s.replace(/[: ]/g,'')}`}
-                    className={`text-xs py-2.5 rounded-xl border transition ${slot===s? "bg-[var(--pizo-coral)]/20 border-[var(--pizo-coral)] text-white":"bg-white/5 border-white/10 text-zinc-400"}`}>
-                    {s}
-                  </button>
-                ))}
+                {SLOTS.map(s => {
+                  const isBooked = bookedSlots.includes(s);
+                  return (
+                    <button key={s} disabled={isBooked} onClick={()=>setSlot(s)} data-testid={`slot-${s.replace(/[: ]/g,'')}`}
+                      className={`text-xs py-2.5 rounded-xl border transition ${isBooked ? "bg-red-500/10 border-red-500/30 text-red-300/60 line-through cursor-not-allowed" : slot===s ? "bg-[var(--pizo-coral)]/20 border-[var(--pizo-coral)] text-white" : "bg-white/5 border-white/10 text-zinc-400"}`}>
+                      {isBooked ? "🔒 " : ""}{s}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] tracking-[0.3em] text-zinc-400">PLAYERS (SPLIT)</label>
+                <input type="number" min="1" max="20" value={numPlayers} onChange={e=>setNumPlayers(Number(e.target.value)||1)}
+                  data-testid="booking-players"
+                  className="w-full mt-2 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none"/>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] tracking-[0.3em] text-zinc-400">PER PLAYER</div>
+                <div className="font-bebas text-3xl gold-text mt-1">₹{Math.round(book.price_per_hour/Math.max(1,numPlayers))}</div>
+              </div>
+            </div>
+            <div className="mt-4">
+              <label className="text-[10px] tracking-[0.3em] text-zinc-400">COUPONS (MAX 2) — FIRST10, LOYAL15, CR-XXXXXX, SCRATCH-XXXXXX</label>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <input value={coupon1} onChange={e=>setCoupon1(e.target.value)} placeholder="Coupon 1" data-testid="coupon-1"
+                  className="bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none uppercase"/>
+                <input value={coupon2} onChange={e=>setCoupon2(e.target.value)} placeholder="Coupon 2" data-testid="coupon-2"
+                  className="bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none uppercase"/>
               </div>
             </div>
             <button onClick={confirmBooking} data-testid="booking-confirm-button"
@@ -144,6 +183,28 @@ export default function Venues() {
       )}
 
       <AuthModal open={authOpen} onClose={()=>setAuthOpen(false)}/>
+
+      {confirmed && (
+        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur flex items-center justify-center p-4" onClick={()=>setConfirmed(null)}>
+          <motion.div initial={{ scale:0.95, y:20 }} animate={{ scale:1, y:0 }} onClick={(e)=>e.stopPropagation()}
+            className="w-full max-w-md glass-strong rounded-3xl p-7 relative text-center" data-testid="booking-confirmed">
+            <div className="mx-auto w-14 h-14 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-300">✓</div>
+            <h3 className="font-display text-2xl font-bold mt-4">Booked!</h3>
+            <p className="text-zinc-400 text-sm mt-2">{confirmed.venue_name} • {confirmed.date} • {confirmed.slot}</p>
+            <div className="grid grid-cols-3 gap-2 mt-5">
+              <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">TOTAL</div><div className="font-bebas text-2xl">₹{confirmed.final_total}</div></div>
+              <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">PLAYERS</div><div className="font-bebas text-2xl">{confirmed.num_players}</div></div>
+              <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">PER PLAYER</div><div className="font-bebas text-2xl gold-text">₹{confirmed.per_player}</div></div>
+            </div>
+            {confirmed.discount_pct > 0 && <div className="mt-3 text-xs text-emerald-300">✓ {confirmed.discount_pct}% off via {confirmed.applied_coupons.join(", ")}</div>}
+            <button onClick={()=>{
+              const shareText = `🏴‍☠️ I booked ${confirmed.venue_name} on ${confirmed.date} ${confirmed.slot}. ₹${confirmed.per_player}/player. Join the crew! Ref: ${confirmed.share_token}`;
+              if (navigator.share) navigator.share({ text: shareText });
+              else { navigator.clipboard.writeText(shareText); toast.success("Copied! Share with crew."); }
+            }} data-testid="booking-share" className="w-full mt-5 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow">Share with Crew</button>
+          </motion.div>
+        </div>
+      )}
     </main>
   );
 }

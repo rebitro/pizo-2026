@@ -15,6 +15,8 @@ import Contact from "@/pages/Contact";
 import Dashboard from "@/pages/Dashboard";
 import OwnerDashboard from "@/pages/OwnerDashboard";
 import AuthCallback from "@/pages/AuthCallback";
+import FindPirate from "@/pages/FindPirate";
+import Merch from "@/pages/Merch";
 
 function AppRouter() {
   const location = useLocation();
@@ -33,6 +35,8 @@ function AppRouter() {
         <Route path="/plans" element={<Plans />} />
         <Route path="/venues" element={<Venues />} />
         <Route path="/contact" element={<Contact />} />
+        <Route path="/find-pirate" element={<FindPirate />} />
+        <Route path="/merch" element={<Merch />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/owner" element={<OwnerDashboard />} />
       </Routes>
