@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronLeft, ChevronRight, Calendar, MapPin } from "lucide-react";
+import { ChevronLeft, ChevronRight, Calendar, MapPin, Ticket } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function Events() {
+  const { user } = useAuth();
   const [events, setEvents] = useState([]);
   const [idx, setIdx] = useState(0);
 
@@ -12,6 +15,14 @@ export default function Events() {
   const next = () => setIdx((idx + 1) % Math.max(1, events.length));
   const prev = () => setIdx((idx - 1 + events.length) % Math.max(1, events.length));
   const current = events[idx];
+
+  const register = async (eventId) => {
+    if (!user) { toast.error("Sign in to register"); return; }
+    try { await api.post(`/events/${eventId}/register`); toast.success("Registered! See you there 🏴‍☠️"); }
+    catch { toast.error("Registration failed"); }
+  };
+
+  const isUpcoming = (d) => new Date(d) >= new Date();
 
   return (
     <main className="pt-32 pb-24 px-6 max-w-7xl mx-auto" data-testid="events-page">
@@ -44,6 +55,12 @@ export default function Events() {
                       <span key={i} className="px-3 py-1.5 rounded-full glass text-xs">{h}</span>
                     ))}
                   </div>
+                  {isUpcoming(current.date) && (
+                    <button onClick={()=>register(current.event_id)} data-testid={`event-register-${current.event_id}`}
+                      className="mt-6 px-6 py-3 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow flex items-center gap-2">
+                      <Ticket size={14}/> Register Now
+                    </button>
+                  )}
                 </div>
               </div>
             </motion.div>

@@ -377,10 +377,13 @@ async def create_booking(body: BookingIn, user: User = Depends(require_user)):
         from datetime import date as _d
         bdate = _d.fromisoformat(body.date)
         days_ahead = (bdate - now_utc().date()).days
-        if bdate.weekday() >= 4 and days_ahead > 6:
-            sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": "premium"})
-            if not sub:
-                raise HTTPException(status_code=403, detail="Premium Pass required to book weekend slots more than 6 days ahead.")
+        # Get user's active subscription
+        sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active"})
+        plan_id = sub["plan_id"] if sub else None
+        # Normal user: max 7 days ahead. Pass holders: 14 days ahead
+        max_days = 14 if plan_id in ("premium", "family", "student") else 7
+        if days_ahead > max_days:
+            raise HTTPException(status_code=403, detail=f"{'Pass holders' if plan_id else 'Normal users'} can only book up to {max_days} days ahead. Upgrade for more.")
     except HTTPException: raise
     except Exception: pass
 
@@ -392,6 +395,13 @@ async def create_booking(body: BookingIn, user: User = Depends(require_user)):
     discount_pct = 0
     applied = []
     user_booking_count = await db.bookings.count_documents({"user_id": user.user_id})
+
+    # Auto pass-based discount: Premium 12%, Family 10%, Student 8%
+    pass_discount_map = {"premium": 12, "family": 10, "student": 8}
+    if plan_id in pass_discount_map:
+        discount_pct += pass_discount_map[plan_id]
+        applied.append(f"PASS-{plan_id.upper()}")
+
     for code in coupons:
         c = code.upper().strip()
         if c == "FIRST10" and user_booking_count == 0 and base_price > 100:
@@ -553,9 +563,28 @@ async def create_alert(body: PirateAlertIn, user: User = Depends(require_user)):
     return doc
 
 @api_router.post("/pirates/alerts/{alert_id}/join")
-async def join_alert(alert_id: str, user: User = Depends(require_user)):
-    await db.pirate_alerts.update_one({"alert_id": alert_id}, {"$addToSet": {"responders": {"user_id": user.user_id, "name": user.name}}})
+async def join_alert(alert_id: str, payload: dict, user: User = Depends(require_user)):
+    contact = payload.get("contact", "")
+    await db.pirate_alerts.update_one({"alert_id": alert_id}, {"$addToSet": {"responders": {"user_id": user.user_id, "name": user.name, "contact": contact, "joined_at": iso(now_utc())}}})
     return {"ok": True}
+
+@api_router.get("/pirates/my-alerts")
+async def my_alerts(user: User = Depends(require_user)):
+    posted = await db.pirate_alerts.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    joined = await db.pirate_alerts.find({"responders.user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return {"posted": posted, "joined": joined}
+
+# ---------- Event registration ----------
+class EventRegIn(BaseModel):
+    event_id: str
+
+@api_router.post("/events/{event_id}/register")
+async def register_event(event_id: str, user: User = Depends(require_user)):
+    ev = await db.events.find_one({"event_id": event_id})
+    if not ev: raise HTTPException(404, "Event not found")
+    reg_id = f"reg_{uuid.uuid4().hex[:8]}"
+    await db.event_regs.insert_one({"reg_id": reg_id, "event_id": event_id, "user_id": user.user_id, "user_name": user.name, "created_at": iso(now_utc())})
+    return {"ok": True, "reg_id": reg_id}
 
 # ---------- Merch (Premium-only catalog) ----------
 MERCH = [
@@ -724,10 +753,13 @@ async def contact(body: ContactIn):
     doc = {
         "contact_id": f"ct_{uuid.uuid4().hex[:10]}",
         **body.model_dump(),
+        "forward_to": "crewpizo.in@gmail.com",
         "created_at": iso(now_utc()),
     }
     await db.contacts.insert_one(doc)
-    return {"ok": True}
+    # Email forwarding to crewpizo.in@gmail.com configured (SMTP creds needed for live send)
+    logger.info(f"NEW CONTACT for crewpizo.in@gmail.com: {body.email} - {body.name}")
+    return {"ok": True, "forwarded_to": "crewpizo.in@gmail.com"}
 
 # ---------- Health ----------
 @api_router.get("/")

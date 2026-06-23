@@ -56,9 +56,9 @@ export default function Contact() {
         <motion.div initial={{opacity:0, x:30}} whileInView={{opacity:1, x:0}} viewport={{once:true}} className="space-y-5">
           <div className="glass rounded-3xl p-7">
             <div className="text-[10px] tracking-[0.3em] text-zinc-400">DROP BY</div>
-            <div className="flex items-center gap-2 mt-3 text-sm"><MapPin size={14} className="text-[var(--pizo-gold)]"/> 6th Floor, Pirate Wharf, Bandra Kurla Complex, Mumbai 400051</div>
-            <div className="flex items-center gap-2 mt-2 text-sm"><Phone size={14} className="text-[var(--pizo-gold)]"/> +91 99999 12345</div>
-            <div className="flex items-center gap-2 mt-2 text-sm"><Mail size={14} className="text-[var(--pizo-gold)]"/> crew@pizo.app</div>
+            <div className="flex items-center gap-2 mt-3 text-sm"><MapPin size={14} className="text-[var(--pizo-gold)]"/> Barasirohi, Kalyanpur, Kanpur, Uttar Pradesh</div>
+            <div className="flex items-center gap-2 mt-2 text-sm"><Phone size={14} className="text-[var(--pizo-gold)]"/> +91 76788 71048</div>
+            <div className="flex items-center gap-2 mt-2 text-sm"><Mail size={14} className="text-[var(--pizo-gold)]"/> crewpizo.in@gmail.com</div>
             <div className="flex gap-3 mt-5">
               {[Instagram, Youtube, Twitter].map((Icon, i)=>(
                 <a key={i} href="#" className="w-10 h-10 rounded-full glass-strong hover:bg-white/10 flex items-center justify-center transition"><Icon size={14}/></a>
@@ -75,7 +75,7 @@ export default function Contact() {
             />
             <div className="absolute inset-0 pointer-events-none border border-white/10 rounded-3xl"/>
             <div className="absolute bottom-4 left-4 glass-strong rounded-full px-4 py-2 text-xs flex items-center gap-2">
-              <MapPin size={12} className="text-[var(--pizo-coral)]"/> Pirate Wharf, Mumbai
+              <MapPin size={12} className="text-[var(--pizo-coral)]"/> Barasirohi, Kanpur
             </div>
           </motion.div>
         </motion.div>
@@ -93,6 +93,10 @@ function Field({ icon, label, type = "text", value, onChange, testid }) {
         <input type={type} value={value} onChange={(e)=>onChange(e.target.value)} required
           className="flex-1 bg-transparent py-3 text-sm text-white outline-none" data-testid={testid}/>
       </div>
+    </div>
+  );
+}
+ </div>
     </div>
   );
 }
