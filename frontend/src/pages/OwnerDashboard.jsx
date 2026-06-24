@@ -1,12 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Navigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid } from "recharts";
-import { Building, IndianRupee, Users, Calendar, Plus, X, Lock, Copy, Check, Anchor, Award } from "lucide-react";
+import { Building, IndianRupee, Users, Calendar, Plus, X, Lock, Check, Anchor, Award, Upload, Trash2, ImagePlus } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { startRazorpayCheckout } from "@/lib/razorpay";
 import CaptainsCard from "@/components/CaptainsCard";
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
+const fullUrl = (u) => (u && u.startsWith("/api/") ? `${BACKEND_URL}${u}` : u);
 
 const CATS = ["turf","gaming","billiards","pickleball"];
 const ONBOARD_FEE = 149;
@@ -17,8 +21,10 @@ export default function OwnerDashboard() {
   const [addOpen, setAddOpen] = useState(false);
   const [onboardOpen, setOnboardOpen] = useState(false);
   const [onboardPaying, setOnboardPaying] = useState(false);
-  const [onboardRef, setOnboardRef] = useState(null);
-  const [form, setForm] = useState({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, image:"https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", description:"", amenities:"Floodlights,Parking" });
+  const [submitting, setSubmitting] = useState(false);
+  const [form, setForm] = useState({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, description:"", amenities:"Floodlights,Parking" });
+  const [images, setImages] = useState([]); // [{url, uploading?}]
+  const fileRef = useRef(null);
   const [cardVenue, setCardVenue] = useState(null);
 
   const load = async () => {
@@ -47,33 +53,79 @@ export default function OwnerDashboard() {
   const payOnboard = async () => {
     setOnboardPaying(true);
     try {
-      const { data } = await api.post("/owners/onboard", { upi_id: "pizo@upi" });
-      setOnboardRef(data.upi_ref);
-      toast.success(`Onboarded! Ref ${data.upi_ref}`);
+      await startRazorpayCheckout({
+        amount: ONBOARD_FEE,
+        purpose: "owner_onboard",
+        name: user.name, email: user.email,
+        theme: "#FF5E3A",
+        description: "Owner Onboarding (one-time)",
+      });
+      toast.success("Onboarded! You're a verified PIZO owner.");
       await checkAuth();
+      setOnboardOpen(false);
+      setAddOpen(true);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Onboarding failed");
+      const msg = e?.response?.data?.detail || e?.message || "Payment failed";
+      if (msg !== "Payment cancelled") toast.error(msg);
     } finally {
       setOnboardPaying(false);
     }
   };
 
-  const closeOnboard = () => { setOnboardOpen(false); setOnboardRef(null); };
+  const handleUpload = async (files) => {
+    const f = Array.from(files || []);
+    if (f.length === 0) return;
+    const available = 3 - images.length;
+    if (available <= 0) { toast.error("Max 3 images per venue"); return; }
+    const toUpload = f.slice(0, available);
+    for (const file of toUpload) {
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const { data } = await api.post("/uploads/image", fd, { headers: { "Content-Type": "multipart/form-data" }});
+        setImages((prev) => [...prev, { url: data.url }]);
+      } catch (e) {
+        toast.error(e?.response?.data?.detail || "Upload failed");
+      }
+    }
+  };
+
+  const removeImage = (idx) => setImages((prev) => prev.filter((_, i) => i !== idx));
 
   const submit = async (e) => {
     e.preventDefault();
+    if (images.length === 0) { toast.error("Add at least 1 image (up to 3)"); return; }
+    setSubmitting(true);
     try {
+      const imgUrls = images.map(i => i.url);
       await api.post("/venues", {
         ...form,
+        image: imgUrls[0],
+        images: imgUrls,
         price_per_hour: Number(form.price_per_hour),
         amenities: form.amenities.split(",").map(s=>s.trim()).filter(Boolean),
       });
       toast.success("Venue added — live on the marketplace!");
-      setAddOpen(false); load();
+      setAddOpen(false);
+      setImages([]);
+      setForm({ name:"", category:"turf", city:"", address:"", price_per_hour:1000, description:"", amenities:"Floodlights,Parking" });
+      load();
     } catch (e) {
       if (e?.response?.status === 402) { setAddOpen(false); setOnboardOpen(true); return; }
       toast.error(e?.response?.data?.detail || "Failed to add venue");
-    }
+    } finally { setSubmitting(false); }
+  };
+
+  const closeOnboard = () => { setOnboardOpen(false); };
+  const closeAdd = () => { setAddOpen(false); };
+
+  const deleteVenue = async (v) => {
+    if (!window.confirm(`Delete "${v.name}"? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/venues/${v.venue_id}`);
+      toast.success("Venue removed");
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Delete failed"); }
   };
 
   // chart data
@@ -182,11 +234,38 @@ export default function OwnerDashboard() {
       </div>
 
       {addOpen && (
-        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={()=>setAddOpen(false)}>
+        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={closeAdd}>
           <motion.form onSubmit={submit} initial={{ scale:0.95, y:20 }} animate={{ scale:1, y:0 }}
-            onClick={(e)=>e.stopPropagation()} className="w-full max-w-lg glass-strong rounded-3xl p-7 relative" data-testid="add-venue-modal">
-            <button type="button" onClick={()=>setAddOpen(false)} className="absolute top-4 right-4 p-2 rounded-full bg-white/5"><X size={16}/></button>
+            onClick={(e)=>e.stopPropagation()} className="w-full max-w-xl glass-strong rounded-3xl p-7 relative max-h-[90vh] overflow-y-auto" data-testid="add-venue-modal">
+            <button type="button" onClick={closeAdd} className="absolute top-4 right-4 p-2 rounded-full bg-white/5 z-10"><X size={16}/></button>
             <h3 className="font-display text-2xl font-bold">Add a Venue</h3>
+            <p className="text-xs text-zinc-400 mt-1">Upload up to 3 photos of your venue — first one becomes the cover.</p>
+
+            {/* Image uploader */}
+            <div className="mt-5">
+              <label className="text-[10px] tracking-widest text-zinc-400">PHOTOS (UP TO 3)</label>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {images.map((img, i) => (
+                  <div key={i} className="relative aspect-square rounded-xl overflow-hidden border border-white/10">
+                    <img src={fullUrl(img.url)} className="w-full h-full object-cover" alt={`upload-${i}`}/>
+                    {i === 0 && <span className="absolute top-1 left-1 px-2 py-0.5 rounded-full bg-[var(--pizo-gold)] text-black text-[9px] font-bold">COVER</span>}
+                    <button type="button" onClick={()=>removeImage(i)} className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/70 text-white flex items-center justify-center">
+                      <X size={12}/>
+                    </button>
+                  </div>
+                ))}
+                {images.length < 3 && (
+                  <button type="button" onClick={()=>fileRef.current?.click()}
+                    className="aspect-square rounded-xl border-2 border-dashed border-white/15 hover:border-[var(--pizo-gold)] flex flex-col items-center justify-center gap-2 text-zinc-400 hover:text-[var(--pizo-gold-soft)] transition"
+                    data-testid="venue-image-upload-btn">
+                    <ImagePlus size={20}/>
+                    <span className="text-[10px] tracking-widest">ADD PHOTO</span>
+                  </button>
+                )}
+              </div>
+              <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e)=>{ handleUpload(e.target.files); e.target.value = ""; }} data-testid="venue-image-input"/>
+            </div>
+
             <div className="grid grid-cols-2 gap-3 mt-5">
               <Input label="Name" value={form.name} onChange={v=>setForm({...form,name:v})}/>
               <div>
@@ -198,11 +277,12 @@ export default function OwnerDashboard() {
               <Input label="City" value={form.city} onChange={v=>setForm({...form,city:v})}/>
               <Input label="Price/hr" type="number" value={form.price_per_hour} onChange={v=>setForm({...form,price_per_hour:v})}/>
               <div className="col-span-2"><Input label="Address" value={form.address} onChange={v=>setForm({...form,address:v})}/></div>
-              <div className="col-span-2"><Input label="Image URL" value={form.image} onChange={v=>setForm({...form,image:v})}/></div>
               <div className="col-span-2"><Input label="Amenities (comma)" value={form.amenities} onChange={v=>setForm({...form,amenities:v})}/></div>
               <div className="col-span-2"><Input label="Description" value={form.description} onChange={v=>setForm({...form,description:v})}/></div>
             </div>
-            <button type="submit" className="w-full mt-6 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow" data-testid="add-venue-submit">Add to Fleet</button>
+            <button type="submit" disabled={submitting} className="w-full mt-6 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow disabled:opacity-60" data-testid="add-venue-submit">
+              {submitting ? "Hoisting..." : "Add to Fleet"}
+            </button>
           </motion.form>
         </div>
       )}
@@ -215,49 +295,29 @@ export default function OwnerDashboard() {
             <div className="text-[10px] tracking-[0.3em] text-[var(--pizo-coral-soft)]">PIRATE LICENSE</div>
             <h3 className="font-display text-2xl font-bold mt-1">Owner onboarding</h3>
 
-            {!onboardRef ? (
-              <>
-                <div className="mt-5 glass rounded-2xl p-5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-[10px] tracking-widest text-zinc-400">ONE-TIME FEE</div>
-                      <div className="font-bebas text-5xl gold-text">₹{ONBOARD_FEE}</div>
-                    </div>
-                    <div className="text-right text-xs text-zinc-400">
-                      <div>UPI: <span className="text-white">pizo@upi</span></div>
-                      <div className="mt-1">No subscription. No renewal.</div>
-                    </div>
-                  </div>
+            <div className="mt-5 glass rounded-2xl p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] tracking-widest text-zinc-400">ONE-TIME FEE</div>
+                  <div className="font-bebas text-5xl gold-text">₹{ONBOARD_FEE}</div>
                 </div>
-                <ul className="mt-5 space-y-2 text-sm text-zinc-300">
-                  <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> List unlimited venues</li>
-                  <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Venues go live instantly on the marketplace</li>
-                  <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Footfall & revenue analytics</li>
-                  <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Pirates Verified badge after first 10 bookings</li>
-                </ul>
-                <button onClick={payOnboard} disabled={onboardPaying} data-testid="onboard-pay-button"
-                  className="w-full mt-6 py-3.5 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow disabled:opacity-60 flex items-center justify-center gap-2">
-                  <Anchor size={14}/> {onboardPaying ? "Hoisting..." : `Pay ₹${ONBOARD_FEE} via UPI`}
-                </button>
-                <p className="text-[10px] text-zinc-500 mt-3 text-center">MOCKED for demo. Razorpay live flow once keys are provided.</p>
-              </>
-            ) : (
-              <div className="mt-6 text-center">
-                <div className="mx-auto w-14 h-14 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-300">
-                  <Check size={22}/>
+                <div className="text-right text-xs text-zinc-400">
+                  <div>Powered by <span className="text-white">Razorpay</span></div>
+                  <div className="mt-1">UPI • Card • Netbanking</div>
                 </div>
-                <h4 className="font-display text-xl font-bold mt-4">You're a verified PIZO owner.</h4>
-                <p className="text-zinc-400 text-sm mt-2">Pay ₹{ONBOARD_FEE} to <span className="text-white">pizo@upi</span> using this reference:</p>
-                <div className="mt-3 inline-flex items-center gap-2 glass px-4 py-2 rounded-full text-sm font-mono cursor-pointer"
-                  onClick={()=>{navigator.clipboard.writeText(onboardRef); toast.success("Copied!");}}>
-                  {onboardRef} <Copy size={14}/>
-                </div>
-                <button onClick={()=>{ closeOnboard(); setAddOpen(true); }} data-testid="onboard-continue"
-                  className="w-full mt-6 py-3 rounded-full bg-[var(--pizo-coral)] text-white font-bold coral-glow">
-                  Add your first venue
-                </button>
               </div>
-            )}
+            </div>
+            <ul className="mt-5 space-y-2 text-sm text-zinc-300">
+              <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> List unlimited venues with up to 3 photos each</li>
+              <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Venues go live instantly on the marketplace</li>
+              <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Footfall & revenue analytics</li>
+              <li className="flex items-start gap-2"><Check size={14} className="text-[var(--pizo-gold)] mt-0.5"/> Pirates Verified badge after first 10 bookings</li>
+            </ul>
+            <button onClick={payOnboard} disabled={onboardPaying} data-testid="onboard-pay-button"
+              className="w-full mt-6 py-3.5 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow disabled:opacity-60 flex items-center justify-center gap-2">
+              <Anchor size={14}/> {onboardPaying ? "Opening Razorpay..." : `Pay ₹${ONBOARD_FEE} & Activate`}
+            </button>
+            <p className="text-[10px] text-zinc-500 mt-3 text-center">Secure checkout via Razorpay. Test mode active.</p>
           </motion.div>
         </div>
       )}
@@ -284,5 +344,8 @@ function Input({ label, value, onChange, type="text" }) {
       <input type={type} value={value} onChange={(e)=>onChange(e.target.value)} required
         className="w-full mt-2 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[var(--pizo-coral)]"/>
     </div>
+  );
+}
+
   );
 }

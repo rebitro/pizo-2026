@@ -1,0 +1,79 @@
+// Razorpay checkout loader + helper
+import { api } from "@/lib/api";
+
+const RZP_SCRIPT = "https://checkout.razorpay.com/v1/checkout.js";
+
+let _loadingPromise = null;
+export function loadRazorpay() {
+  if (window.Razorpay) return Promise.resolve(true);
+  if (_loadingPromise) return _loadingPromise;
+  _loadingPromise = new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = RZP_SCRIPT;
+    s.async = true;
+    s.onload = () => resolve(true);
+    s.onerror = () => { _loadingPromise = null; resolve(false); };
+    document.body.appendChild(s);
+  });
+  return _loadingPromise;
+}
+
+/**
+ * Initiate a Razorpay checkout end-to-end.
+ * - Calls backend /payments/razorpay/order to create order
+ * - Opens Razorpay checkout
+ * - Verifies signature on success via /payments/razorpay/verify
+ *
+ * @param {object} opts
+ * @param {number} opts.amount        Amount in rupees (whole INR)
+ * @param {"subscription"|"owner_onboard"} opts.purpose
+ * @param {string} [opts.plan_id]     Required for subscription
+ * @param {string} [opts.name]        Prefill user name
+ * @param {string} [opts.email]       Prefill email
+ * @param {string} [opts.theme]       Hex color, defaults to gold
+ * @param {string} [opts.description] Checkout description
+ * @returns {Promise<{ok:true, payload:object}>}
+ */
+export async function startRazorpayCheckout({ amount, purpose, plan_id, name, email, theme = "#D4AF37", description }) {
+  const ok = await loadRazorpay();
+  if (!ok) throw new Error("Failed to load Razorpay SDK. Check your network.");
+
+  const { data: order } = await api.post("/payments/razorpay/order", {
+    amount, purpose, plan_id, notes: { description: description || purpose },
+  });
+
+  return new Promise((resolve, reject) => {
+    const rzp = new window.Razorpay({
+      key: order.key_id,
+      amount: order.amount,
+      currency: order.currency,
+      order_id: order.order_id,
+      name: "PIZO • Pirates of Play",
+      description: description || (purpose === "subscription" ? "Pirate Pass" : "Owner Onboarding"),
+      image: "https://customer-assets.emergentagent.com/job_5138dde7-fb31-42b6-b878-d3f8be1c4d5f/artifacts/xbraui72_517247711_17859671220445839_4953795569973148132_n.jpg",
+      prefill: { name: name || order.name, email: email || order.email },
+      theme: { color: theme, backdrop_color: "#070707" },
+      modal: {
+        ondismiss: () => reject(new Error("Payment cancelled")),
+      },
+      handler: async (resp) => {
+        try {
+          const { data } = await api.post("/payments/razorpay/verify", {
+            razorpay_order_id: resp.razorpay_order_id,
+            razorpay_payment_id: resp.razorpay_payment_id,
+            razorpay_signature: resp.razorpay_signature,
+            purpose,
+            plan_id,
+          });
+          resolve({ ok: true, payload: data });
+        } catch (e) {
+          reject(e);
+        }
+      },
+    });
+    rzp.on("payment.failed", (e) => {
+      reject(new Error(e?.error?.description || "Payment failed"));
+    });
+    rzp.open();
+  });
+}

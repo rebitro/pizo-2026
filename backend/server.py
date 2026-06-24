@@ -1,5 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Header, UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,6 +10,9 @@ import uuid
 import bcrypt
 import jwt
 import requests
+import hmac
+import hashlib
+import razorpay
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Annotated
@@ -16,6 +20,9 @@ from datetime import datetime, timezone, timedelta
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -25,8 +32,15 @@ JWT_SECRET = os.environ.get('JWT_SECRET', 'pizo-super-secret-key-change-in-prod'
 JWT_ALGO = 'HS256'
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
+rzp_client = None
+if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
+    rzp_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
 app = FastAPI(title="PIZO API")
 api_router = APIRouter(prefix="/api")
+
 
 # ---------- Models ----------
 def now_utc():
@@ -64,6 +78,7 @@ class VenueIn(BaseModel):
     price_per_hour: int
     rating: float = 4.5
     image: str
+    images: List[str] = []
     amenities: List[str] = []
     description: str = ""
     owner_id: Optional[str] = None
@@ -334,13 +349,26 @@ async def owner_status(user: User = Depends(require_user)):
 
 
 @api_router.get("/venues", response_model=List[Venue])
-async def list_venues(category: Optional[str] = None, city: Optional[str] = None):
+async def list_venues(category: Optional[str] = None, city: Optional[str] = None, sort: Optional[str] = None):
     q = {}
     if category and category != "all":
         q["category"] = category
     if city and city != "all":
         q["city"] = city
-    docs = await db.venues.find(q, {"_id": 0}).to_list(500)
+    sort_map = {
+        "price_asc":  [("price_per_hour", 1)],
+        "price_desc": [("price_per_hour", -1)],
+        "rating":     [("rating", -1)],
+        "newest":     [("created_at", -1)],
+    }
+    cursor = db.venues.find(q, {"_id": 0})
+    if sort in sort_map:
+        cursor = cursor.sort(sort_map[sort])
+    docs = await cursor.to_list(500)
+    # ensure images list always present
+    for d in docs:
+        if not d.get("images"):
+            d["images"] = [d.get("image")] if d.get("image") else []
     return docs
 
 @api_router.post("/venues", response_model=Venue)
@@ -804,6 +832,355 @@ async def admin_unverify(venue_id: str, _: bool = Depends(require_admin)):
 async def admin_contacts(_: bool = Depends(require_admin)):
     return await db.contacts.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
 
+# ---------- Admin: Users CRUD ----------
+class AdminUserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None  # user / owner / admin
+    owner_onboarded: Optional[bool] = None
+    picture: Optional[str] = None
+
+@api_router.get("/admin/users")
+async def admin_users(_: bool = Depends(require_admin), role: Optional[str] = None):
+    q = {}
+    if role: q["role"] = role
+    docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(1000)
+    return docs
+
+@api_router.put("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, body: AdminUserUpdate, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd:
+        raise HTTPException(400, "No fields to update")
+    r = await db.users.update_one({"user_id": user_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "User not found")
+    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    return u
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, _: bool = Depends(require_admin)):
+    r = await db.users.delete_one({"user_id": user_id})
+    if r.deleted_count == 0: raise HTTPException(404, "User not found")
+    # cascade: their subscriptions, bookings, creator profile
+    await db.subscriptions.delete_many({"user_id": user_id})
+    await db.bookings.delete_many({"user_id": user_id})
+    await db.creators.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+# ---------- Admin: Creators CRUD ----------
+class AdminCreatorUpdate(BaseModel):
+    name: Optional[str] = None
+    handle: Optional[str] = None
+    bio: Optional[str] = None
+    category: Optional[str] = None
+    engagement: Optional[int] = None
+    consistency: Optional[int] = None
+    quality: Optional[int] = None
+    avatar: Optional[str] = None
+    badges: Optional[List[str]] = None
+
+@api_router.get("/admin/creators")
+async def admin_creators(_: bool = Depends(require_admin)):
+    docs = await db.creators.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api_router.put("/admin/creators/{creator_id}")
+async def admin_update_creator(creator_id: str, body: AdminCreatorUpdate, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.creators.update_one({"creator_id": creator_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Creator not found")
+    return await db.creators.find_one({"creator_id": creator_id}, {"_id": 0})
+
+@api_router.delete("/admin/creators/{creator_id}")
+async def admin_delete_creator(creator_id: str, _: bool = Depends(require_admin)):
+    r = await db.creators.delete_one({"creator_id": creator_id})
+    if r.deleted_count == 0: raise HTTPException(404, "Creator not found")
+    return {"ok": True}
+
+# ---------- Admin: Venues full CRUD ----------
+class AdminVenueUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+    price_per_hour: Optional[int] = None
+    rating: Optional[float] = None
+    image: Optional[str] = None
+    images: Optional[List[str]] = None
+    amenities: Optional[List[str]] = None
+    description: Optional[str] = None
+    verified: Optional[bool] = None
+    owner_id: Optional[str] = None
+
+@api_router.post("/admin/venues")
+async def admin_create_venue(body: VenueIn, _: bool = Depends(require_admin)):
+    venue_id = f"venue_{uuid.uuid4().hex[:10]}"
+    doc = body.model_dump()
+    doc.update({"venue_id": venue_id, "created_at": iso(now_utc())})
+    if not doc.get("images"): doc["images"] = [doc["image"]] if doc.get("image") else []
+    await db.venues.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.put("/admin/venues/{venue_id}")
+async def admin_update_venue(venue_id: str, body: AdminVenueUpdate, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.venues.update_one({"venue_id": venue_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Venue not found")
+    return await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+
+@api_router.delete("/admin/venues/{venue_id}")
+async def admin_delete_venue(venue_id: str, _: bool = Depends(require_admin)):
+    r = await db.venues.delete_one({"venue_id": venue_id})
+    if r.deleted_count == 0: raise HTTPException(404, "Venue not found")
+    await db.bookings.delete_many({"venue_id": venue_id})
+    return {"ok": True}
+
+# ---------- Razorpay payments ----------
+class RzpOrderIn(BaseModel):
+    amount: int  # rupees
+    purpose: str  # subscription / owner_onboard
+    plan_id: Optional[str] = None
+    notes: Optional[dict] = None
+
+@api_router.get("/payments/razorpay/config")
+async def razorpay_config():
+    return {"key_id": RAZORPAY_KEY_ID, "enabled": bool(rzp_client)}
+
+@api_router.post("/payments/razorpay/order")
+async def create_rzp_order(body: RzpOrderIn, user: User = Depends(require_user)):
+    if not rzp_client:
+        raise HTTPException(503, "Razorpay not configured")
+    amount_paise = int(body.amount) * 100
+    receipt = f"pizo-{body.purpose[:8]}-{uuid.uuid4().hex[:8]}"
+    notes = body.notes or {}
+    notes.update({"user_id": user.user_id, "purpose": body.purpose})
+    if body.plan_id: notes["plan_id"] = body.plan_id
+    try:
+        order = rzp_client.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": receipt[:40],
+            "payment_capture": 1,
+            "notes": notes,
+        })
+    except Exception as e:
+        logger.error(f"Razorpay order create failed: {e}")
+        raise HTTPException(502, "Payment provider error")
+    await db.rzp_orders.insert_one({
+        "order_id": order["id"],
+        "user_id": user.user_id,
+        "amount": body.amount,
+        "purpose": body.purpose,
+        "plan_id": body.plan_id,
+        "status": "created",
+        "created_at": iso(now_utc()),
+    })
+    return {
+        "order_id": order["id"],
+        "amount": order["amount"],
+        "currency": order["currency"],
+        "key_id": RAZORPAY_KEY_ID,
+        "name": user.name,
+        "email": user.email,
+    }
+
+class RzpVerifyIn(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    purpose: str
+    plan_id: Optional[str] = None
+
+def verify_rzp_signature(order_id: str, payment_id: str, signature: str) -> bool:
+    body = f"{order_id}|{payment_id}".encode()
+    expected = hmac.new(RAZORPAY_KEY_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+@api_router.post("/payments/razorpay/verify")
+async def verify_rzp_payment(body: RzpVerifyIn, user: User = Depends(require_user)):
+    if not verify_rzp_signature(body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature):
+        raise HTTPException(400, "Invalid payment signature")
+    await db.rzp_orders.update_one(
+        {"order_id": body.razorpay_order_id},
+        {"$set": {"status": "paid", "payment_id": body.razorpay_payment_id, "paid_at": iso(now_utc())}}
+    )
+    # Fulfill based on purpose
+    if body.purpose == "subscription":
+        plan = PLAN_CATALOG.get(body.plan_id or "")
+        if not plan: raise HTTPException(400, "Invalid plan")
+        sub_id = f"sub_{uuid.uuid4().hex[:10]}"
+        starts = now_utc()
+        expires = starts + timedelta(days=30)
+        doc = {
+            "subscription_id": sub_id, "user_id": user.user_id,
+            "plan_id": body.plan_id, "plan_name": plan["name"],
+            "amount": plan["amount"], "status": "active",
+            "upi_ref": body.razorpay_payment_id,
+            "payment_id": body.razorpay_payment_id,
+            "order_id": body.razorpay_order_id,
+            "starts_at": iso(starts), "expires_at": iso(expires),
+            "created_at": iso(starts),
+        }
+        await db.subscriptions.insert_one(doc)
+        doc.pop("_id", None)
+        return {"ok": True, "subscription": doc}
+    elif body.purpose == "owner_onboard":
+        await db.owner_payments.insert_one({
+            "payment_id": f"op_{uuid.uuid4().hex[:10]}",
+            "user_id": user.user_id, "amount": OWNER_ONBOARD_FEE,
+            "rzp_payment_id": body.razorpay_payment_id,
+            "rzp_order_id": body.razorpay_order_id,
+            "status": "paid", "created_at": iso(now_utc()),
+        })
+        await db.users.update_one(
+            {"user_id": user.user_id},
+            {"$set": {"owner_onboarded": True, "role": "owner"}},
+        )
+        u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "password_hash": 0})
+        return {"ok": True, "user": u}
+    return {"ok": True}
+
+# ---------- File uploads (local storage, served via /api/uploads/<file>) ----------
+ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MAX_IMG_BYTES = 8 * 1024 * 1024  # 8 MB
+
+@api_router.post("/uploads/image")
+async def upload_image(file: UploadFile = File(...), user: User = Depends(require_user)):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_IMG_EXT:
+        raise HTTPException(400, "Only jpg/jpeg/png/webp/gif allowed")
+    data = await file.read()
+    if len(data) > MAX_IMG_BYTES:
+        raise HTTPException(413, "File too large (max 8MB)")
+    fname = f"{uuid.uuid4().hex}{ext}"
+    fpath = UPLOAD_DIR / fname
+    fpath.write_bytes(data)
+    return {"url": f"/api/uploads/{fname}", "filename": fname, "size": len(data)}
+
+# ---------- Creator: my profile + enhanced video upload ----------
+@api_router.get("/creators/me")
+async def my_creator(user: User = Depends(require_user)):
+    creator = await db.creators.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not creator:
+        return {"joined": False}
+    # compute points & rank similar to list_creators
+    all_c = await db.creators.find({}, {"_id": 0}).to_list(500)
+    for d in all_c:
+        d["points"] = int(d.get("engagement", 0) * 0.4 + d.get("consistency", 0) * 0.3 + d.get("quality", 0) * 0.3)
+    all_c.sort(key=lambda x: x["points"], reverse=True)
+    rank = next((i+1 for i, d in enumerate(all_c) if d["creator_id"] == creator["creator_id"]), 0)
+    creator["rank"] = rank
+    creator["points"] = int(creator.get("engagement", 0) * 0.4 + creator.get("consistency", 0) * 0.3 + creator.get("quality", 0) * 0.3)
+    creator["total_creators"] = len(all_c)
+    creator["video_links"] = creator.get("video_links", [])
+    return {"joined": True, **creator}
+
+class CreatorVideoIn2(BaseModel):
+    url: str
+    title: Optional[str] = ""
+    platform: Optional[str] = "instagram"  # instagram / youtube / other
+    thumbnail: Optional[str] = ""
+    views: int = 0
+
+@api_router.post("/creators/video2")
+async def creator_video2(body: CreatorVideoIn2, user: User = Depends(require_user)):
+    creator = await db.creators.find_one({"user_id": user.user_id})
+    if not creator: raise HTTPException(403, "Join Creator Club first")
+    pts = (max(0, body.views) // 1000) * 2
+    video = {
+        "video_id": f"vid_{uuid.uuid4().hex[:8]}",
+        "url": body.url, "title": body.title or "Untitled Reel",
+        "platform": body.platform or "instagram",
+        "thumbnail": body.thumbnail or "",
+        "views": int(body.views or 0),
+        "added_at": iso(now_utc()),
+    }
+    await db.creators.update_one(
+        {"creator_id": creator["creator_id"]},
+        {"$push": {"video_links": video},
+         "$inc": {"engagement": pts}}
+    )
+    return {"ok": True, "video": video, "points_earned": pts}
+
+@api_router.delete("/creators/video/{video_id}")
+async def delete_creator_video(video_id: str, user: User = Depends(require_user)):
+    creator = await db.creators.find_one({"user_id": user.user_id})
+    if not creator: raise HTTPException(403, "Not a creator")
+    await db.creators.update_one(
+        {"creator_id": creator["creator_id"]},
+        {"$pull": {"video_links": {"video_id": video_id}}}
+    )
+    return {"ok": True}
+
+# ---------- Event Videos (admin/owner posts community video links) ----------
+class EventVideoIn(BaseModel):
+    event_id: Optional[str] = None  # link to a specific event or general
+    title: str
+    url: str
+    platform: str = "youtube"  # youtube / instagram / other
+    thumbnail: Optional[str] = ""
+    description: Optional[str] = ""
+
+@api_router.get("/event-videos")
+async def list_event_videos():
+    docs = await db.event_videos.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+@api_router.post("/event-videos")
+async def add_event_video(body: EventVideoIn, user: User = Depends(require_user), x_admin_token: Optional[str] = Header(None)):
+    # Allow admin OR owners
+    is_admin = (x_admin_token == ADMIN_TOKEN)
+    if not is_admin and user.role not in ("owner", "admin"):
+        raise HTTPException(403, "Only admin or owners can post event videos")
+    vid_id = f"evv_{uuid.uuid4().hex[:10]}"
+    doc = {
+        **body.model_dump(),
+        "video_id": vid_id,
+        "posted_by": user.user_id,
+        "posted_by_name": user.name,
+        "created_at": iso(now_utc()),
+    }
+    await db.event_videos.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.delete("/event-videos/{video_id}")
+async def delete_event_video(video_id: str, user: User = Depends(require_user), x_admin_token: Optional[str] = Header(None)):
+    is_admin = (x_admin_token == ADMIN_TOKEN)
+    doc = await db.event_videos.find_one({"video_id": video_id})
+    if not doc: raise HTTPException(404, "Not found")
+    if not is_admin and doc.get("posted_by") != user.user_id:
+        raise HTTPException(403, "Not allowed")
+    await db.event_videos.delete_one({"video_id": video_id})
+    return {"ok": True}
+
+# ---------- Venue: owner-side edit/delete + multi-image ----------
+class VenueImageIn(BaseModel):
+    images: List[str]  # up to 3 image URLs (can be /api/uploads/... or external)
+
+@api_router.put("/venues/{venue_id}/images")
+async def update_venue_images(venue_id: str, body: VenueImageIn, user: User = Depends(require_user)):
+    v = await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+    if not v: raise HTTPException(404, "Not found")
+    if v.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Not your venue")
+    imgs = list(body.images)[:3]
+    if not imgs: raise HTTPException(400, "Provide at least one image")
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"images": imgs, "image": imgs[0]}})
+    return {"ok": True, "images": imgs}
+
+@api_router.delete("/venues/{venue_id}")
+async def delete_my_venue(venue_id: str, user: User = Depends(require_user)):
+    v = await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+    if not v: raise HTTPException(404, "Not found")
+    if v.get("owner_id") != user.user_id and user.role != "admin":
+        raise HTTPException(403, "Not your venue")
+    await db.venues.delete_one({"venue_id": venue_id})
+    return {"ok": True}
+
 # ---------- Seed ----------
 async def seed_data():
     if await db.venues.count_documents({}) == 0:
@@ -850,6 +1227,9 @@ async def on_startup():
     await seed_data()
 
 app.include_router(api_router)
+
+# Static file serving for uploads (under /api/uploads to match ingress)
+app.mount("/api/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,

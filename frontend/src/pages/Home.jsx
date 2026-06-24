@@ -1,17 +1,31 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Anchor, Compass, ArrowRight, Sparkles, Trophy, ShieldCheck, Zap, MapPin, Crown } from "lucide-react";
+import { Anchor, Compass, ArrowRight, Sparkles, Trophy, ShieldCheck, Zap, MapPin, Crown, ArrowUpDown } from "lucide-react";
 import { api, LOGO_URL } from "@/lib/api";
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
+const fullUrl = (u) => (u && u.startsWith("/api/") ? `${BACKEND_URL}${u}` : u);
+
+const HOME_SORTS = [
+  { v: "newest",     l: "Newest" },
+  { v: "price_asc",  l: "Price: Low → High" },
+  { v: "price_desc", l: "Price: High → Low" },
+  { v: "rating",     l: "Top Rated" },
+];
 
 const stat = (n, l) => ({ n, l });
 
 export default function Home() {
   const [venues, setVenues] = useState([]);
   const [events, setEvents] = useState([]);
+  const [sort, setSort] = useState("rating");
 
   useEffect(() => {
-    api.get("/venues").then(r => setVenues(r.data.slice(0,3))).catch(()=>{});
+    api.get("/venues", { params: { sort }}).then(r => setVenues(r.data.slice(0,3))).catch(()=>{});
+  }, [sort]);
+
+  useEffect(() => {
     api.get("/events").then(r => setEvents(r.data.slice(0,3))).catch(()=>{});
   }, []);
 
@@ -117,15 +131,23 @@ export default function Home() {
       <section className="px-6 py-20 max-w-7xl mx-auto">
         <div className="flex items-end justify-between flex-wrap gap-4">
           <SectionHeader eyebrow="MAP THE TREASURE" title="Featured venues in your harbor." compact/>
-          <Link to="/venues" className="text-sm text-[var(--pizo-gold-soft)] hover:underline flex items-center gap-1" data-testid="home-all-venues">
-            All venues <ArrowRight size={14}/>
-          </Link>
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-2 glass rounded-full px-3 py-1.5">
+              <ArrowUpDown size={14} className="text-zinc-400"/>
+              <select value={sort} onChange={(e)=>setSort(e.target.value)} className="bg-transparent text-sm outline-none pr-2" data-testid="home-venue-sort">
+                {HOME_SORTS.map(s => <option key={s.v} value={s.v} className="bg-zinc-900">{s.l}</option>)}
+              </select>
+            </div>
+            <Link to="/venues" className="text-sm text-[var(--pizo-gold-soft)] hover:underline flex items-center gap-1" data-testid="home-all-venues">
+              All venues <ArrowRight size={14}/>
+            </Link>
+          </div>
         </div>
         <div className="grid md:grid-cols-3 gap-5 mt-8">
           {venues.map(v => (
             <motion.div key={v.venue_id} whileHover={{ y: -6 }} className="group glass rounded-3xl overflow-hidden">
               <div className="aspect-[16/11] overflow-hidden">
-                <img src={v.image} className="w-full h-full object-cover group-hover:scale-110 transition duration-700" alt={v.name}/>
+                <img src={fullUrl(v.image)} className="w-full h-full object-cover group-hover:scale-110 transition duration-700" alt={v.name}/>
               </div>
               <div className="p-5">
                 <div className="flex items-center justify-between">

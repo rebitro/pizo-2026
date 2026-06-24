@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { Check, Anchor, Crown, Users, GraduationCap, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { startRazorpayCheckout } from "@/lib/razorpay";
 import AuthModal from "@/components/AuthModal";
 
 const PLANS = [
@@ -23,14 +23,22 @@ export default function Plans() {
 
   const subscribe = async (planId) => {
     if (!user) { setAuthOpen(true); return; }
+    const plan = PLANS.find(p => p.id === planId);
     setPaying(planId);
     try {
-      const upi = "pizo@upi";
-      const { data } = await api.post("/subscriptions", { plan_id: planId, upi_id: upi });
-      setSubbed(data);
-      toast.success(`${data.plan_name} activated! Ref ${data.upi_ref}`);
+      const { payload } = await startRazorpayCheckout({
+        amount: plan.price,
+        purpose: "subscription",
+        plan_id: planId,
+        name: user.name, email: user.email,
+        theme: planId === "premium" ? "#FF5E3A" : "#D4AF37",
+        description: `${plan.name} • Monthly`,
+      });
+      setSubbed(payload.subscription);
+      toast.success(`${payload.subscription.plan_name} activated! 🏴‍☠️`);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Subscription failed");
+      const msg = e?.response?.data?.detail || e?.message || "Payment failed";
+      if (msg !== "Payment cancelled") toast.error(msg);
     } finally {
       setPaying(null);
     }
@@ -84,12 +92,12 @@ export default function Plans() {
             <Check size={22}/>
           </div>
           <h3 className="font-display text-2xl font-bold mt-4">Welcome to {subbed.plan_name}, captain.</h3>
-          <p className="text-zinc-400 text-sm mt-2">Pay ₹{subbed.amount} to <span className="text-white">pizo@upi</span> with reference</p>
-          <div className="mt-4 inline-flex items-center gap-2 glass px-4 py-2 rounded-full text-sm font-mono"
+          <p className="text-zinc-400 text-sm mt-2">Paid ₹{subbed.amount} via Razorpay • Payment ref</p>
+          <div className="mt-4 inline-flex items-center gap-2 glass px-4 py-2 rounded-full text-sm font-mono cursor-pointer"
             onClick={()=>{navigator.clipboard.writeText(subbed.upi_ref); toast.success("Copied!");}}>
             {subbed.upi_ref} <Copy size={14}/>
           </div>
-          <p className="text-xs text-zinc-500 mt-4">Expires {new Date(subbed.expires_at).toLocaleDateString()}. Full Razorpay flow coming next iteration.</p>
+          <p className="text-xs text-zinc-500 mt-4">Expires {new Date(subbed.expires_at).toLocaleDateString()} • Auto-renew via Razorpay.</p>
         </motion.div>
       )}
 

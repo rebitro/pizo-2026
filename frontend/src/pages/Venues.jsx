@@ -1,19 +1,29 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
-import { Filter, Search, MapPin, Star, Calendar, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Filter, Search, MapPin, Star, Calendar, X, ArrowUpDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import AuthModal from "@/components/AuthModal";
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
+const fullUrl = (u) => (u && u.startsWith("/api/") ? `${BACKEND_URL}${u}` : u);
+
 const CATEGORIES = ["all","turf","gaming","billiards","pickleball"];
 const SLOTS = ["6:00 AM - 7:00 AM","8:00 AM - 9:00 AM","11:00 AM - 12:00 PM","4:00 PM - 5:00 PM","6:00 PM - 7:00 PM","8:00 PM - 9:00 PM"];
+const SORTS = [
+  { v: "newest",     l: "Newest" },
+  { v: "price_asc",  l: "Price: Low → High" },
+  { v: "price_desc", l: "Price: High → Low" },
+  { v: "rating",     l: "Top Rated" },
+];
 
 export default function Venues() {
   const { user } = useAuth();
   const [venues, setVenues] = useState([]);
   const [cat, setCat] = useState("all");
   const [city, setCity] = useState("all");
+  const [sort, setSort] = useState("newest");
   const [q, setQ] = useState("");
   const [book, setBook] = useState(null);
   const [date, setDate] = useState(new Date(Date.now()+86400000).toISOString().slice(0,10));
@@ -33,13 +43,13 @@ export default function Venues() {
   }, [book, date]);
 
   const load = async () => {
-    const params = {};
+    const params = { sort };
     if (cat !== "all") params.category = cat;
     if (city !== "all") params.city = city;
     const { data } = await api.get("/venues", { params });
     setVenues(data);
   };
-  useEffect(() => { load(); }, [cat, city]);
+  useEffect(() => { load(); }, [cat, city, sort]);
 
   const cities = useMemo(() => Array.from(new Set(venues.map(v => v.city))), [venues]);
   const filtered = useMemo(() => venues.filter(v => v.name.toLowerCase().includes(q.toLowerCase())), [venues, q]);
@@ -80,12 +90,20 @@ export default function Venues() {
             </button>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-2 glass rounded-full px-3 py-1.5">
-          <Filter size={14} className="text-zinc-400"/>
-          <select value={city} onChange={(e)=>setCity(e.target.value)} className="bg-transparent text-sm outline-none pr-2" data-testid="city-filter">
-            <option value="all" className="bg-zinc-900">All cities</option>
-            {cities.map(c => <option key={c} value={c} className="bg-zinc-900">{c}</option>)}
-          </select>
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 glass rounded-full px-3 py-1.5">
+            <Filter size={14} className="text-zinc-400"/>
+            <select value={city} onChange={(e)=>setCity(e.target.value)} className="bg-transparent text-sm outline-none pr-2" data-testid="city-filter">
+              <option value="all" className="bg-zinc-900">All cities</option>
+              {cities.map(c => <option key={c} value={c} className="bg-zinc-900">{c}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 glass rounded-full px-3 py-1.5">
+            <ArrowUpDown size={14} className="text-zinc-400"/>
+            <select value={sort} onChange={(e)=>setSort(e.target.value)} className="bg-transparent text-sm outline-none pr-2" data-testid="venue-sort">
+              {SORTS.map(s => <option key={s.v} value={s.v} className="bg-zinc-900">{s.l}</option>)}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -94,12 +112,7 @@ export default function Venues() {
           <motion.div key={v.venue_id} initial={{opacity:0,y:30}} whileInView={{opacity:1,y:0}} viewport={{once:true}} transition={{delay:i*0.05}}
             whileHover={{ y: -8 }}
             className="group glass rounded-3xl overflow-hidden hover-lift" data-testid={`venue-card-${v.venue_id}`}>
-            <div className="relative aspect-[16/11] overflow-hidden">
-              <img src={v.image} className="w-full h-full object-cover group-hover:scale-110 transition duration-700" alt={v.name}/>
-              <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-[10px] tracking-widest text-[var(--pizo-gold)]">{v.category.toUpperCase()}</div>
-              {v.verified && <div className="absolute bottom-3 left-3 px-2 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/40 backdrop-blur text-[10px] text-emerald-200">✓ PIRATES VERIFIED</div>}
-              <div className="absolute top-3 right-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-xs flex items-center gap-1"><Star size={12} className="text-[var(--pizo-gold)] fill-[var(--pizo-gold)]"/> {v.rating}</div>
-            </div>
+            <VenueImages v={v}/>
             <div className="p-5">
               <div className="font-display text-xl font-bold">{v.name}</div>
               <div className="text-xs text-zinc-400 flex items-center gap-1 mt-1"><MapPin size={12}/> {v.city} • {v.address}</div>
@@ -206,5 +219,46 @@ export default function Venues() {
         </div>
       )}
     </main>
+  );
+}
+
+function VenueImages({ v }) {
+  const imgs = (v.images && v.images.length ? v.images : [v.image]).filter(Boolean);
+  const [i, setI] = useState(0);
+  const prev = (e) => { e.stopPropagation(); setI((i - 1 + imgs.length) % imgs.length); };
+  const next = (e) => { e.stopPropagation(); setI((i + 1) % imgs.length); };
+  return (
+    <div className="relative aspect-[16/11] overflow-hidden">
+      <AnimatePresence mode="wait">
+        <motion.img
+          key={i}
+          src={fullUrl(imgs[i])}
+          initial={{ opacity: 0, scale: 1.05 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.35 }}
+          className="absolute inset-0 w-full h-full object-cover group-hover:scale-110 transition duration-700"
+          alt={v.name}
+        />
+      </AnimatePresence>
+      <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-[10px] tracking-widest text-[var(--pizo-gold)]">{v.category?.toUpperCase()}</div>
+      {v.verified && <div className="absolute bottom-3 left-3 px-2 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/40 backdrop-blur text-[10px] text-emerald-200">✓ PIRATES VERIFIED</div>}
+      <div className="absolute top-3 right-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur text-xs flex items-center gap-1"><Star size={12} className="text-[var(--pizo-gold)] fill-[var(--pizo-gold)]"/> {v.rating}</div>
+      {imgs.length > 1 && (
+        <>
+          <button onClick={prev} className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+            <ChevronLeft size={14}/>
+          </button>
+          <button onClick={next} className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+            <ChevronRight size={14}/>
+          </button>
+          <div className="absolute bottom-2 right-2 flex gap-1">
+            {imgs.map((_, k) => (
+              <span key={k} className={`h-1 rounded-full transition-all ${k===i ? "w-5 bg-[var(--pizo-gold)]" : "w-1.5 bg-white/40"}`}/>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }

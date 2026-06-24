@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, MapPin, Trophy, Star, Anchor, Crown, Award, Gift, Sparkles, Copy } from "lucide-react";
+import { Calendar, MapPin, Trophy, Star, Anchor, Crown, Award, Gift, Sparkles, Copy, Video, Eye, Plus, Trash2, Instagram, Youtube, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -12,11 +12,13 @@ export default function Dashboard() {
   const [subs, setSubs] = useState([]);
   const [scratches, setScratches] = useState([]);
   const [revealed, setRevealed] = useState(null);
+  const [creator, setCreator] = useState(null);
 
   const loadAll = () => {
     api.get("/bookings/me").then(r=>setBookings(r.data)).catch(()=>{});
     api.get("/subscriptions/me").then(r=>setSubs(r.data)).catch(()=>{});
     api.get("/scratch/me").then(r=>setScratches(r.data)).catch(()=>{});
+    api.get("/creators/me").then(r => setCreator(r.data.joined ? r.data : null)).catch(()=>setCreator(null));
   };
   useEffect(() => { if (user) loadAll(); }, [user]);
 
@@ -155,6 +157,9 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Creator Section (only if joined) */}
+      {creator && <CreatorSection creator={creator} reload={loadAll}/>}
+
       <AnimatePresence>
       {revealed && (
         <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}
@@ -183,6 +188,209 @@ function StatCard({ label, value, icon }) {
         <div className="font-bebas text-4xl gold-text mt-1">{value}</div>
       </div>
       <div className="w-12 h-12 rounded-2xl bg-[var(--pizo-coral)]/15 border border-[var(--pizo-coral)]/30 text-[var(--pizo-coral-soft)] flex items-center justify-center">{icon}</div>
+    </div>
+  );
+}
+
+function CreatorSection({ creator, reload }) {
+  const [form, setForm] = useState({ url: "", title: "", platform: "instagram", thumbnail: "", views: 0 });
+  const [posting, setPosting] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+
+  const videos = creator.video_links || [];
+  const totalViews = videos.reduce((s, v) => s + (Number(v.views) || 0), 0);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.url) { toast.error("Paste your reel/video URL"); return; }
+    setPosting(true);
+    try {
+      const r = await api.post("/creators/video2", { ...form, views: Number(form.views) || 0 });
+      toast.success(`Posted! +${r.data.points_earned} engagement points`);
+      setForm({ url:"", title:"", platform:"instagram", thumbnail:"", views:0 });
+      setShowForm(false);
+      reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Post failed");
+    } finally { setPosting(false); }
+  };
+
+  const remove = async (id) => {
+    if (!window.confirm("Remove this video?")) return;
+    try { await api.delete(`/creators/video/${id}`); toast.success("Removed"); reload(); }
+    catch { toast.error("Could not remove"); }
+  };
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}
+      className="mt-10 relative overflow-hidden glass-strong rounded-3xl p-7 border border-[var(--pizo-gold)]/30"
+      data-testid="dashboard-creator-section">
+      <div className="absolute -top-20 -right-20 w-64 h-64 bg-[var(--pizo-gold)]/15 blur-3xl rounded-full"/>
+      <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-[var(--pizo-coral)]/10 blur-3xl rounded-full"/>
+
+      <div className="relative flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-[var(--pizo-gold)]/20 border border-[var(--pizo-gold)]/40 flex items-center justify-center text-[var(--pizo-gold-soft)]">
+            <Trophy size={18}/>
+          </div>
+          <div>
+            <div className="text-[10px] tracking-[0.3em] text-[var(--pizo-gold-soft)]">CREATOR CLUB MEMBER</div>
+            <div className="font-display text-2xl font-black">Your Creator Deck</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="px-3 py-1 rounded-full bg-[var(--pizo-gold)]/10 border border-[var(--pizo-gold)]/30 text-[var(--pizo-gold-soft)] text-xs font-mono">{creator.referral_code}</span>
+          <button onClick={()=>{ navigator.clipboard.writeText(creator.referral_code); toast.success("Code copied!"); }}
+            className="p-2 rounded-full glass hover:bg-white/10" title="Copy referral code">
+            <Copy size={14}/>
+          </button>
+        </div>
+      </div>
+
+      {/* Analytics */}
+      <div className="relative grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
+        <Mini l="RANK" v={creator.rank ? `#${creator.rank}` : "—"} icon={<TrendingUp size={14}/>}/>
+        <Mini l="POINTS" v={creator.points || 0} icon={<Star size={14}/>}/>
+        <Mini l="VIDEOS" v={videos.length} icon={<Video size={14}/>}/>
+        <Mini l="TOTAL VIEWS" v={totalViews.toLocaleString()} icon={<Eye size={14}/>}/>
+      </div>
+
+      {/* Score breakdown */}
+      <div className="relative mt-4 grid grid-cols-3 gap-3 text-xs">
+        <div className="glass rounded-xl p-3">
+          <div className="text-[9px] tracking-widest text-zinc-500">ENGAGEMENT</div>
+          <div className="mt-1 flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+              <motion.div initial={{ width: 0 }} animate={{ width: `${Math.min(100, creator.engagement || 0)}%` }} transition={{ duration: 1 }}
+                className="h-full bg-[var(--pizo-coral)]"/>
+            </div>
+            <span className="font-bebas text-lg gold-text w-8 text-right">{creator.engagement || 0}</span>
+          </div>
+        </div>
+        <div className="glass rounded-xl p-3">
+          <div className="text-[9px] tracking-widest text-zinc-500">CONSISTENCY</div>
+          <div className="mt-1 flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+              <motion.div initial={{ width: 0 }} animate={{ width: `${Math.min(100, creator.consistency || 0)}%` }} transition={{ duration: 1, delay: 0.2 }}
+                className="h-full bg-[var(--pizo-gold)]"/>
+            </div>
+            <span className="font-bebas text-lg gold-text w-8 text-right">{creator.consistency || 0}</span>
+          </div>
+        </div>
+        <div className="glass rounded-xl p-3">
+          <div className="text-[9px] tracking-widest text-zinc-500">QUALITY</div>
+          <div className="mt-1 flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+              <motion.div initial={{ width: 0 }} animate={{ width: `${Math.min(100, creator.quality || 0)}%` }} transition={{ duration: 1, delay: 0.4 }}
+                className="h-full bg-emerald-400"/>
+            </div>
+            <span className="font-bebas text-lg gold-text w-8 text-right">{creator.quality || 0}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Videos */}
+      <div className="relative mt-6 flex items-center justify-between">
+        <div className="text-[10px] tracking-[0.3em] text-zinc-400">YOUR REELS & VIDEOS</div>
+        <button onClick={()=>setShowForm(!showForm)} data-testid="creator-post-video-btn"
+          className="px-4 py-2 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white text-xs font-bold coral-glow flex items-center gap-1">
+          <Plus size={14}/> {showForm ? "Cancel" : "Post Video"}
+        </button>
+      </div>
+
+      <AnimatePresence>
+      {showForm && (
+        <motion.form
+          initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
+          onSubmit={submit} className="mt-4 glass rounded-2xl p-5 overflow-hidden" data-testid="creator-video-form">
+          <div className="grid md:grid-cols-2 gap-3">
+            <div className="md:col-span-2">
+              <label className="text-[10px] tracking-widest text-zinc-400">VIDEO URL (Instagram Reel / YouTube)</label>
+              <input value={form.url} onChange={(e)=>setForm({...form, url:e.target.value})} placeholder="https://..."
+                className="w-full mt-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none"/>
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest text-zinc-400">TITLE</label>
+              <input value={form.title} onChange={(e)=>setForm({...form, title:e.target.value})} placeholder="Sick turf goal"
+                className="w-full mt-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none"/>
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest text-zinc-400">PLATFORM</label>
+              <select value={form.platform} onChange={(e)=>setForm({...form, platform:e.target.value})}
+                className="w-full mt-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm">
+                <option value="instagram" className="bg-zinc-900">Instagram</option>
+                <option value="youtube" className="bg-zinc-900">YouTube</option>
+                <option value="other" className="bg-zinc-900">Other</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest text-zinc-400">VIEWS</label>
+              <input type="number" min="0" value={form.views} onChange={(e)=>setForm({...form, views:e.target.value})}
+                className="w-full mt-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none"/>
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest text-zinc-400">THUMBNAIL URL (optional)</label>
+              <input value={form.thumbnail} onChange={(e)=>setForm({...form, thumbnail:e.target.value})} placeholder="https://..."
+                className="w-full mt-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none"/>
+            </div>
+          </div>
+          <button type="submit" disabled={posting} data-testid="creator-video-submit"
+            className="w-full md:w-auto mt-4 px-6 py-2.5 rounded-full bg-[var(--pizo-gold)]/20 border border-[var(--pizo-gold)]/40 text-[var(--pizo-gold-soft)] text-xs font-bold disabled:opacity-60">
+            {posting ? "Posting..." : "Post Video • Earn Points"}
+          </button>
+          <p className="text-[10px] text-zinc-500 mt-2">+2 engagement points for every 1,000 views.</p>
+        </motion.form>
+      )}
+      </AnimatePresence>
+
+      {videos.length === 0 ? (
+        <div className="mt-4 text-sm text-zinc-500 text-center py-8 border border-dashed border-white/10 rounded-2xl">
+          <Video className="mx-auto text-zinc-700" size={28}/>
+          <div className="mt-2">No videos yet. Drop your first reel to climb the leaderboard.</div>
+        </div>
+      ) : (
+        <div className="grid md:grid-cols-3 gap-3 mt-4">
+          {videos.slice().reverse().map((v, i) => (
+            <motion.div key={v.video_id || i} initial={{opacity:0,y:20}} animate={{opacity:1,y:0}} transition={{delay:i*0.08}}
+              whileHover={{ y: -4 }}
+              className="relative group glass-strong rounded-2xl overflow-hidden">
+              <a href={v.url} target="_blank" rel="noreferrer" className="block">
+                <div className="relative aspect-video bg-gradient-to-br from-zinc-800 to-zinc-900 flex items-center justify-center overflow-hidden">
+                  {v.thumbnail ? (
+                    <img src={v.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition duration-500" alt={v.title}/>
+                  ) : (
+                    <div className="text-zinc-600">
+                      {v.platform === "youtube" ? <Youtube size={42}/> : v.platform === "instagram" ? <Instagram size={42}/> : <Video size={42}/>}
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent"/>
+                  <div className="absolute top-2 left-2 px-2 py-1 rounded-full bg-black/70 backdrop-blur text-[9px] tracking-widest text-[var(--pizo-gold)] uppercase">{v.platform}</div>
+                  <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between text-[10px] text-white">
+                    <span className="font-bold truncate pr-2">{v.title}</span>
+                    <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60"><Eye size={10}/>{(v.views || 0).toLocaleString()}</span>
+                  </div>
+                </div>
+              </a>
+              {v.video_id && (
+                <button onClick={()=>remove(v.video_id)} title="Remove"
+                  className="absolute top-2 right-2 w-7 h-7 rounded-full bg-red-500/80 hover:bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+                  <Trash2 size={12}/>
+                </button>
+              )}
+            </motion.div>
+          ))}
+        </div>
+      )}
+    </motion.section>
+  );
+}
+
+function Mini({ l, v, icon }) {
+  return (
+    <div className="glass rounded-2xl p-3">
+      <div className="text-[9px] tracking-widest text-zinc-500 flex items-center gap-1">{icon} {l}</div>
+      <div className="font-bebas text-2xl gold-text mt-1">{v}</div>
     </div>
   );
 }
