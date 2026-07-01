@@ -4,23 +4,30 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, MapPin, Trophy, Star, Anchor, Crown, Award, Gift, Sparkles, Copy, Video, Eye, Plus, Trash2, Instagram, Youtube, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
+import { startRazorpayCheckout } from "@/lib/razorpay";
 import { api } from "@/lib/api";
 
 export default function Dashboard() {
-  const { user, loading } = useAuth();
+  const { user, loading, checkAuth } = useAuth();
   const [bookings, setBookings] = useState([]);
   const [subs, setSubs] = useState([]);
   const [scratches, setScratches] = useState([]);
   const [revealed, setRevealed] = useState(null);
   const [creator, setCreator] = useState(null);
+  const [chest, setChest] = useState([]);
 
   const loadAll = () => {
     api.get("/bookings/me").then(r=>setBookings(r.data)).catch(()=>{});
     api.get("/subscriptions/me").then(r=>setSubs(r.data)).catch(()=>{});
     api.get("/scratch/me").then(r=>setScratches(r.data)).catch(()=>{});
     api.get("/creators/me").then(r => setCreator(r.data.joined ? r.data : null)).catch(()=>setCreator(null));
+    api.get("/auth/me").then(r=>{ /* refresh user */ }).catch(()=>{});
   };
   useEffect(() => { if (user) loadAll(); }, [user]);
+  useEffect(() => {
+    if (!user) return;
+    api.get('/me/chest').then(r=>setChest(r.data.items || [])).catch(()=>setChest([]));
+  }, [user]);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-zinc-400">Loading...</div>;
   if (!user) return <Navigate to="/" replace />;
@@ -60,6 +67,11 @@ export default function Dashboard() {
             <h1 className="font-display text-3xl md:text-4xl font-black">Ahoy, {user.name?.split(" ")[0]}</h1>
           </div>
         </div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-zinc-400">Wallet</div>
+          <div className="font-bebas text-2xl gold-text">₹{(user?.wallet_balance || 0)}</div>
+          <AddCoinsButton user={user} checkAuth={checkAuth} loadAll={loadAll} />
+        </div>
         {!activeSub ? (
           <Link to="/plans" className="px-5 py-2.5 rounded-full bg-[var(--pizo-coral)] text-white font-bold text-sm coral-glow" data-testid="dashboard-upgrade-button">Activate a Pass</Link>
         ) : activeSub.plan_id !== "premium" && (
@@ -81,6 +93,27 @@ export default function Dashboard() {
         <div className="mt-4 h-2.5 rounded-full bg-white/5 overflow-hidden">
           <motion.div initial={{ width: 0 }} animate={{ width: `${progressPct}%` }} transition={{ duration: 0.8 }}
             className="h-full bg-gradient-to-r from-[var(--pizo-gold)] to-[var(--pizo-coral)] rounded-full"/>
+        </div>
+      </div>
+      <div className="mt-6 glass rounded-3xl p-6">
+        <div className="flex items-center gap-2 text-[10px] tracking-[0.3em] text-[var(--pizo-gold-soft)]"><Gift size={12}/> MY CHEST</div>
+        <div className="mt-3">
+          {chest.length === 0 ? <div className="text-sm text-zinc-400">No items in your chest yet.</div> : (
+            <div className="space-y-2">
+              {chest.map(item => (
+                <div key={item.id} className="flex items-center gap-3">
+                  {item.image ? <img src={item.image} alt={item.name} className="w-12 h-12 rounded object-cover" /> : <div className="w-12 h-12 rounded bg-white/5"/>}
+                  <div>
+                    <div className="text-sm font-semibold">{item.name}</div>
+                    <div className="text-xs text-zinc-400">{item.description}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="mt-3 text-right">
+          <Link to="/my-orders" className="text-sm text-[var(--pizo-gold-soft)] underline">My Orders</Link>
         </div>
       </div>
 
@@ -125,7 +158,7 @@ export default function Dashboard() {
           <div className="mt-5 space-y-3">
             {bookings.length === 0 && <div className="text-sm text-zinc-400">No bookings yet. <Link to="/venues" className="text-[var(--pizo-gold-soft)] underline">Find a venue</Link>.</div>}
             {bookings.slice(0,6).map(b => (
-              <div key={b.booking_id} className="flex items-center justify-between glass-strong rounded-2xl p-4">
+                <div key={b.booking_id} className="flex items-center justify-between glass-strong rounded-2xl p-4">
                 <div>
                   <div className="font-display text-lg font-bold">{b.venue_name}</div>
                   <div className="text-xs text-zinc-400 flex items-center gap-3 mt-1">
@@ -134,7 +167,15 @@ export default function Dashboard() {
                     {b.num_players > 1 && <span>• {b.num_players}p ₹{b.per_player}/ea</span>}
                   </div>
                 </div>
-                <span className="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs">{b.status}</span>
+                  <div className="flex flex-col items-end gap-2">
+                    <span className="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs">{b.status}</span>
+                    {b.status === 'confirmed' && (
+                      <div className="flex gap-2">
+                        <RefundButton booking={b} onDone={loadAll} />
+                        <RescheduleButton booking={b} onDone={loadAll} />
+                      </div>
+                    )}
+                  </div>
               </div>
             ))}
           </div>
@@ -383,6 +424,133 @@ function CreatorSection({ creator, reload }) {
         </div>
       )}
     </motion.section>
+  );
+}
+
+function RefundButton({ booking, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState('wallet');
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await api.post(`/bookings/${booking.booking_id}/refund`, { mode, reason });
+      toast.success(mode === 'wallet' ? 'Refund credited to wallet' : 'Refund requested (UPI)');
+      onDone && onDone();
+      setOpen(false);
+    } catch (err) { toast.error(err?.response?.data?.detail || 'Refund failed'); }
+    finally { setLoading(false); }
+  };
+  return (
+    <div>
+      <button onClick={() => setOpen(true)} className="py-1 px-2 rounded-full bg-red-500/10 text-red-200 text-xs">Refund</button>
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form onSubmit={submit} className="glass rounded-2xl p-6 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold mb-2">Request Refund</h3>
+            <div className="mb-2 text-xs text-zinc-400">Booking: {booking.booking_id} • {booking.venue_name}</div>
+            <div className="grid gap-2">
+              <label className="text-xs">Mode</label>
+              <select value={mode} onChange={e=>setMode(e.target.value)} className="p-2 rounded bg-black/40">
+                <option value="wallet">Wallet (instant)</option>
+                <option value="upi">UPI (1-2 working days)</option>
+              </select>
+              <label className="text-xs">Reason (optional)</label>
+              <input value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason" className="p-2 rounded bg-black/40" />
+              <div className="flex gap-2 mt-3">
+                <button disabled={loading} className="py-2 px-4 rounded-full bg-[var(--pizo-coral)] text-white">{loading? 'Submitting...':'Submit'}</button>
+                <button type="button" onClick={()=>setOpen(false)} className="py-2 px-4 rounded-full bg-white/5">Cancel</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RescheduleButton({ booking, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState('');
+  const [slot, setSlot] = useState('');
+  const [loading, setLoading] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      if (!date || !slot) { toast.error('Please provide date and slot'); setLoading(false); return; }
+      // basic date format check YYYY-MM-DD
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast.error('Date must be YYYY-MM-DD'); setLoading(false); return; }
+      const resp = await api.post(`/bookings/${booking.booking_id}/reschedule`, { date, slot });
+      toast.success('Rescheduled');
+      onDone && onDone();
+      setOpen(false);
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Reschedule failed';
+      if (err?.response?.status === 409) toast.error(detail || 'Requested slot already booked');
+      else if (err?.response?.status === 403) toast.error(detail || 'Reschedule not allowed');
+      else toast.error(detail);
+    }
+    finally { setLoading(false); }
+  };
+  return (
+    <div>
+      <button onClick={()=>setOpen(true)} className="py-1 px-2 rounded-full bg-white/5 text-xs">Reschedule</button>
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form onSubmit={submit} className="glass rounded-2xl p-6 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold mb-2">Reschedule Booking</h3>
+            <div className="grid gap-2">
+              <label className="text-xs">New Date</label>
+              <input value={date} onChange={e=>setDate(e.target.value)} placeholder="YYYY-MM-DD" className="p-2 rounded bg-black/40" />
+              <label className="text-xs">New Slot</label>
+              <input value={slot} onChange={e=>setSlot(e.target.value)} placeholder="e.g. 18:00-19:00" className="p-2 rounded bg-black/40" />
+              <div className="flex gap-2 mt-3">
+                <button disabled={loading} className="py-2 px-4 rounded-full bg-[var(--pizo-coral)] text-white">{loading? 'Submitting...':'Submit'}</button>
+                <button type="button" onClick={()=>setOpen(false)} className="py-2 px-4 rounded-full bg-white/5">Cancel</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddCoinsButton({ user, checkAuth, loadAll }) {
+  const [open, setOpen] = useState(false);
+  const [amt, setAmt] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    const a = Number(amt);
+    if (!a || a <= 0) return;
+    setLoading(true);
+    try {
+      await startRazorpayCheckout({ amount: a, purpose: 'wallet_topup', name: user.name, email: user.email, description: 'Wallet top-up' });
+      toast.success('Wallet topped up');
+      await checkAuth(); loadAll(); setOpen(false);
+    } catch (e) { const msg = e?.response?.data?.detail || e?.message || 'Top-up failed'; if (msg !== 'Payment cancelled') toast.error(msg); }
+    finally { setLoading(false); }
+  };
+  return (
+    <>
+      <button onClick={()=>setOpen(true)} className="ml-3 px-4 py-2 rounded-full bg-[var(--pizo-coral)] text-white text-sm">Add Coins</button>
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={()=>setOpen(false)}>
+          <form onSubmit={submit} className="glass rounded-2xl p-6 w-full max-w-sm" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold">Top-up Wallet</h3>
+            <input type="number" min="1" value={amt} onChange={e=>setAmt(e.target.value)} className="mt-3 p-2 rounded bg-black/40" placeholder="Amount (INR)" />
+            <div className="flex gap-2 mt-3">
+              <button disabled={loading} className="py-2 px-4 rounded-full bg-[var(--pizo-coral)] text-white">{loading? 'Processing...':'Pay'}</button>
+              <button type="button" onClick={()=>setOpen(false)} className="py-2 px-4 rounded-full bg-white/5">Cancel</button>
+            </div>
+          </form>
+        </div>
+      )}
+    </>
   );
 }
 

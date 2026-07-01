@@ -34,12 +34,16 @@ export function loadRazorpay() {
  * @param {string} [opts.description] Checkout description
  * @returns {Promise<{ok:true, payload:object}>}
  */
-export async function startRazorpayCheckout({ amount, purpose, plan_id, name, email, theme = "#D4AF37", description }) {
+export async function startRazorpayCheckout({ amount, purpose, plan_id, purchase_payload, booking_payload, name, email, theme = "#D4AF37", description }) {
   const ok = await loadRazorpay();
   if (!ok) throw new Error("Failed to load Razorpay SDK. Check your network.");
 
   const { data: order } = await api.post("/payments/razorpay/order", {
-    amount, purpose, plan_id, notes: { description: description || purpose },
+    amount,
+    purpose,
+    plan_id,
+    purchase_payload,
+    notes: { description: description || purpose },
   });
 
   return new Promise((resolve, reject) => {
@@ -64,6 +68,8 @@ export async function startRazorpayCheckout({ amount, purpose, plan_id, name, em
             razorpay_signature: resp.razorpay_signature,
             purpose,
             plan_id,
+            purchase_payload,
+            booking_payload,
           });
           resolve({ ok: true, payload: data });
         } catch (e) {

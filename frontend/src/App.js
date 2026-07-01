@@ -14,10 +14,13 @@ import Venues from "@/pages/Venues";
 import Contact from "@/pages/Contact";
 import Dashboard from "@/pages/Dashboard";
 import OwnerDashboard from "@/pages/OwnerDashboard";
+import StaffLogin from "@/pages/StaffLogin";
+import StaffQR from "@/pages/StaffQR";
 import AuthCallback from "@/pages/AuthCallback";
 import FindPirate from "@/pages/FindPirate";
 import Merch from "@/pages/Merch";
 import Admin from "@/pages/Admin";
+import MyOrders from "@/pages/MyOrders";
 
 function AppRouter() {
   const location = useLocation();
@@ -38,8 +41,11 @@ function AppRouter() {
         <Route path="/contact" element={<Contact />} />
         <Route path="/find-pirate" element={<FindPirate />} />
         <Route path="/merch" element={<Merch />} />
+        <Route path="/my-orders" element={<MyOrders />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/owner" element={<OwnerDashboard />} />
+        <Route path="/staff/login" element={<StaffLogin />} />
+        <Route path="/staff/qr" element={<StaffQR />} />
         <Route path="/admin" element={<Admin />} />
       </Routes>
       <Footer />

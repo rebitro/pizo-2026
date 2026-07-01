@@ -30,10 +30,11 @@ export default function Venues() {
   const [slot, setSlot] = useState(SLOTS[4]);
   const [numPlayers, setNumPlayers] = useState(2);
   const [coupon1, setCoupon1] = useState("");
-  const [coupon2, setCoupon2] = useState("");
+  const [useWallet, setUseWallet] = useState(false);
   const [bookedSlots, setBookedSlots] = useState([]);
   const [authOpen, setAuthOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
+  const [bookingLoading, setBookingLoading] = useState(false);
 
   useEffect(() => {
     if (!book) return;
@@ -54,16 +55,73 @@ export default function Venues() {
   const cities = useMemo(() => Array.from(new Set(venues.map(v => v.city))), [venues]);
   const filtered = useMemo(() => venues.filter(v => v.name.toLowerCase().includes(q.toLowerCase())), [venues, q]);
 
+  const loadRazorpay = async () => {
+    if (window.Razorpay) return true;
+    return new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = "https://checkout.razorpay.com/v1/checkout.js";
+      s.async = true;
+      s.onload = () => resolve(true);
+      s.onerror = () => resolve(false);
+      document.body.appendChild(s);
+    });
+  };
+
   const confirmBooking = async () => {
     if (!user) { setAuthOpen(true); return; }
+    if (!book) return;
+    setBookingLoading(true);
     try {
-      const coupons = ["FIRST10", coupon1].filter(Boolean);
-      const { data } = await api.post("/bookings", { venue_id: book.venue_id, date, slot, num_players: numPlayers, coupons });
-      setConfirmed(data);
-      toast.success(`Booked ${book.name} • ₹${data.per_player}/player`);
-      setBook(null); setCoupon1(""); setCoupon2(""); setNumPlayers(2);
+      const coupons = [coupon1].filter(Boolean);
+      const payload = { venue_id: book.venue_id, date, slot, num_players: numPlayers, coupons, use_wallet: useWallet };
+      const orderResp = await api.post("/payments/booking/order", payload);
+      let bookingData;
+      if (orderResp.data.amount > 0 && orderResp.data.order_id) {
+        const loaded = await loadRazorpay();
+        if (!loaded) throw new Error("Payment SDK failed to load");
+        bookingData = await new Promise((resolve, reject) => {
+          const rzp = new window.Razorpay({
+            key: orderResp.data.key_id,
+            amount: orderResp.data.amount,
+            currency: orderResp.data.currency,
+            order_id: orderResp.data.order_id,
+            name: book.name,
+            description: `Booking for ${book.name}`,
+            prefill: { name: user.name, email: user.email },
+            theme: { color: "#D4AF37", backdrop_color: "#070707" },
+            modal: { ondismiss: () => reject(new Error("Payment cancelled")) },
+            handler: async (resp) => {
+              try {
+                const { data } = await api.post("/payments/razorpay/verify", {
+                  razorpay_order_id: resp.razorpay_order_id,
+                  razorpay_payment_id: resp.razorpay_payment_id,
+                  razorpay_signature: resp.razorpay_signature,
+                  purpose: "booking",
+                  booking_payload: payload,
+                });
+                resolve(data.booking);
+              } catch (err) {
+                reject(err);
+              }
+            },
+          });
+          rzp.on("payment.failed", (e) => reject(new Error(e?.error?.description || "Payment failed")));
+          rzp.open();
+        });
+      } else {
+        const r = await api.post("/bookings", payload);
+        bookingData = r.data;
+      }
+      setConfirmed(bookingData);
+      toast.success(`Booked ${book.name} • ₹${bookingData.per_player}/player`);
+      setBook(null);
+      setCoupon1("");
+      setNumPlayers(2);
+      setUseWallet(false);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Booking failed");
+      toast.error(e?.response?.data?.detail || e?.message || "Booking failed");
+    } finally {
+      setBookingLoading(false);
     }
   };
 
@@ -179,17 +237,19 @@ export default function Venues() {
               </div>
             </div>
             <div className="mt-4">
-              <label className="text-[10px] tracking-[0.3em] text-zinc-400">COUPONS (MAX 2) — FIRST10, LOYAL15, CR-XXXXXX, SCRATCH-XXXXXX</label>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <input value={coupon1} onChange={e=>setCoupon1(e.target.value)} placeholder="Coupon 1" data-testid="coupon-1"
-                  className="bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none uppercase"/>
-                <input value={coupon2} onChange={e=>setCoupon2(e.target.value)} placeholder="Coupon 2" data-testid="coupon-2"
+              <label className="text-[10px] tracking-[0.3em] text-zinc-400">COUPON (MAX 1) — FIRST10, LOYAL15, CR-XXXXXX, SCRATCH-XXXXXX</label>
+              <div className="mt-2 grid grid-cols-1 gap-2">
+                <input value={coupon1} onChange={e=>setCoupon1(e.target.value)} placeholder="Coupon code" data-testid="coupon-1"
                   className="bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none uppercase"/>
               </div>
+              <label className="mt-3 flex items-center gap-3 text-sm text-zinc-300">
+                <input type="checkbox" checked={useWallet} onChange={(e)=>setUseWallet(e.target.checked)} className="h-4 w-4 rounded border-white/10 bg-black/40" />
+                Use wallet balance if available
+              </label>
             </div>
-            <button onClick={confirmBooking} data-testid="booking-confirm-button"
-              className="w-full mt-6 py-3.5 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow">
-              Confirm Booking — ₹{book.price_per_hour}
+            <button onClick={confirmBooking} disabled={bookingLoading} data-testid="booking-confirm-button"
+              className="w-full mt-6 py-3.5 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow disabled:opacity-50 disabled:cursor-not-allowed">
+              {bookingLoading ? "Processing..." : `Confirm Booking — ₹${book.price_per_hour}`}
             </button>
           </motion.div>
         </div>
@@ -208,6 +268,14 @@ export default function Venues() {
               <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">TOTAL</div><div className="font-bebas text-2xl">₹{confirmed.final_total}</div></div>
               <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">PLAYERS</div><div className="font-bebas text-2xl">{confirmed.num_players}</div></div>
               <div className="glass rounded-xl p-3"><div className="text-[10px] text-zinc-500">PER PLAYER</div><div className="font-bebas text-2xl gold-text">₹{confirmed.per_player}</div></div>
+            </div>
+            <div className="mt-4">
+              <div className="text-[10px] text-zinc-500">Booking ID</div>
+              <div className="font-mono text-sm text-white mt-1">{confirmed.booking_id}</div>
+            </div>
+            <div className="mt-4">
+              <div className="text-[10px] text-zinc-500">QR Code</div>
+              <img src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(confirmed.booking_id)}`} alt="QR" className="mx-auto mt-2" />
             </div>
             {confirmed.discount_pct > 0 && <div className="mt-3 text-xs text-emerald-300">✓ {confirmed.discount_pct}% off via {confirmed.applied_coupons.join(", ")}</div>}
             <button onClick={()=>{

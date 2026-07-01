@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 export default function CreatorClub() {
   const [creators, setCreators] = useState([]);
   const [filter, setFilter] = useState("all");
+  const [showJoinForm, setShowJoinForm] = useState(false);
 
   useEffect(() => { api.get("/creators").then(r => setCreators(r.data)).catch(()=>{}); }, []);
 
@@ -118,21 +119,15 @@ export default function CreatorClub() {
           <Trophy className="mx-auto text-[var(--pizo-gold)]" size={32}/>
           <h2 className="font-display text-3xl md:text-5xl font-black mt-4">Got the spark?</h2>
           <p className="text-zinc-300 mt-3 max-w-xl mx-auto">Drop your reel, claim a spot, and the next monthly crown could be yours.</p>
-          <button onClick={async ()=>{
-            if (!window.confirm("Join Creator Club? You'll get a referral code instantly.")) return;
-            const name = prompt("Your name?"); if (!name) return;
-            const phone = prompt("Phone or email?"); if (!phone) return;
-            const instagram = prompt("Instagram handle?") || "";
-            const youtube = prompt("YouTube channel?") || "";
-            try {
-              const r = await (await import("@/lib/api")).api.post("/creators/join", { name, phone, instagram, youtube, bio:"" });
-              alert(`Welcome! Your referral code: ${r.data.referral_code}`);
-              window.location.reload();
-            } catch(e) { alert("Join failed - sign in first"); }
-          }} className="mt-6 px-7 py-3 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow" data-testid="creator-apply-button">
+          <button onClick={()=> setShowJoinForm(true)} className="mt-6 px-7 py-3 rounded-full bg-[var(--pizo-coral)] hover:bg-[var(--pizo-coral-soft)] text-white font-bold coral-glow" data-testid="creator-apply-button">
             Apply to the Crew
           </button>
         </div>
+        {showJoinForm && (
+          <div className="mt-6">
+            <JoinForm onClose={() => setShowJoinForm(false)} onJoined={() => { setShowJoinForm(false); window.location.reload(); }} />
+          </div>
+        )}
       </div>
     </main>
   );
@@ -144,5 +139,36 @@ function Pill({ l, v }) {
       <div className="text-[9px] tracking-widest text-zinc-500">{l}</div>
       <div className="font-bebas text-lg text-white">{v}</div>
     </div>
+  );
+}
+
+function JoinForm({ onClose, onJoined }) {
+  const [form, setForm] = useState({ name: '', phone: '', instagram: '', youtube: '', bio: '' });
+  const [loading, setLoading] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.name || !form.phone) { alert('Name and contact required'); return; }
+    setLoading(true);
+    try {
+      const r = await (await import('@/lib/api')).api.post('/creators/join', form);
+      alert(`Welcome! Your referral code: ${r.data.referral_code}`);
+      onJoined && onJoined();
+    } catch (err) { alert('Join failed: ' + (err?.response?.data?.detail || err.message || 'error')); }
+    finally { setLoading(false); }
+  };
+  return (
+    <form onSubmit={submit} className="mt-4 glass rounded-2xl p-4">
+      <div className="grid gap-3">
+        <input placeholder="Name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} className="p-2 rounded bg-black/40" />
+        <input placeholder="Phone or email" value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})} className="p-2 rounded bg-black/40" />
+        <input placeholder="Instagram" value={form.instagram} onChange={e=>setForm({...form,instagram:e.target.value})} className="p-2 rounded bg-black/40" />
+        <input placeholder="YouTube" value={form.youtube} onChange={e=>setForm({...form,youtube:e.target.value})} className="p-2 rounded bg-black/40" />
+        <textarea placeholder="Short bio (optional)" value={form.bio} onChange={e=>setForm({...form,bio:e.target.value})} className="p-2 rounded bg-black/40" />
+        <div className="flex gap-2">
+          <button disabled={loading} className="py-2 px-4 rounded-full bg-[var(--pizo-coral)] text-white">{loading? 'Joining...':'Join'}</button>
+          <button type="button" onClick={onClose} className="py-2 px-4 rounded-full bg-white/5">Cancel</button>
+        </div>
+      </div>
+    </form>
   );
 }

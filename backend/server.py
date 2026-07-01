@@ -3,10 +3,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import uuid
+import random
 import bcrypt
 import jwt
 import requests
@@ -24,10 +24,95 @@ load_dotenv(ROOT_DIR / '.env')
 UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
 
+# MongoDB setup - try real MongoDB first, fallback to mongomock with async wrapper
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+db_name = os.environ.get('DB_NAME', 'pizo')
+print("ADMIN_TOKEN from env:", os.getenv("ADMIN_TOKEN"))
+
+import asyncio
+
+# Async wrappers to expose Motor-like async methods for a sync mongomock DB
+class AsyncCursorWrapper:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def sort(self, *args, **kwargs):
+        try:
+            self._cursor = self._cursor.sort(*args, **kwargs)
+        except Exception:
+            pass
+        return self
+
+    async def to_list(self, length=None):
+        def collect():
+            try:
+                if length:
+                    return list(self._cursor.limit(length))
+                return list(self._cursor)
+            except Exception:
+                return list(self._cursor)
+        return await asyncio.to_thread(collect)
+
+class AsyncCollectionWrapper:
+    def __init__(self, coll):
+        self._coll = coll
+
+    def find(self, *args, **kwargs):
+        return AsyncCursorWrapper(self._coll.find(*args, **kwargs))
+
+    async def find_one(self, *args, **kwargs):
+        return await asyncio.to_thread(self._coll.find_one, *args, **kwargs)
+
+    async def insert_many(self, docs):
+        return await asyncio.to_thread(self._coll.insert_many, docs)
+
+    async def insert_one(self, doc):
+        return await asyncio.to_thread(self._coll.insert_one, doc)
+
+    async def count_documents(self, filter):
+        return await asyncio.to_thread(self._coll.count_documents, filter)
+
+    async def update_one(self, *args, **kwargs):
+        return await asyncio.to_thread(self._coll.update_one, *args, **kwargs)
+
+    async def delete_many(self, *args, **kwargs):
+        return await asyncio.to_thread(self._coll.delete_many, *args, **kwargs)
+
+class AsyncDBWrapper:
+    def __init__(self, sync_db):
+        self._db = sync_db
+
+    def __getattr__(self, name):
+        return AsyncCollectionWrapper(self._db[name])
+
+    def __getitem__(self, name):
+        return AsyncCollectionWrapper(self._db[name])
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    from pymongo import MongoClient as SyncMongoClient
+    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=2000)
+    # Synchronously test connectivity with pymongo to detect offline MongoDB
+    try:
+        sync_test = SyncMongoClient(mongo_url, serverSelectionTimeoutMS=2000)
+        sync_test.admin.command('ping')
+        db = client[db_name]
+        logging.info(f"Using real MongoDB at {mongo_url}")
+        using_mock = False
+    except Exception as conn_err:
+        logging.warning(f"MongoDB ping failed ({conn_err}), falling back to mongomock")
+        raise conn_err
+except Exception:
+    logging.warning("Using mongomock with async adapter")
+    try:
+        from mongomock import MongoClient
+        sync_client = MongoClient()
+        db = AsyncDBWrapper(sync_client[db_name])
+        using_mock = True
+    except Exception as mock_err:
+        logging.error(f"Mongomock also failed: {mock_err}")
+        raise
 JWT_SECRET = os.environ.get('JWT_SECRET', 'pizo-super-secret-key-change-in-prod')
 JWT_ALGO = 'HS256'
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
@@ -68,6 +153,7 @@ class User(BaseModel):
     picture: Optional[str] = None
     auth_provider: str = "jwt"  # jwt or google
     owner_onboarded: bool = False
+    wallet_balance: int = 0
     created_at: str
 
 class VenueIn(BaseModel):
@@ -83,6 +169,7 @@ class VenueIn(BaseModel):
     description: str = ""
     owner_id: Optional[str] = None
     verified: bool = False
+    reschedule_allowed: bool = True
 
 class Venue(VenueIn):
     venue_id: str
@@ -94,6 +181,17 @@ class BookingIn(BaseModel):
     slot: str
     num_players: Optional[int] = 1
     coupons: Optional[List[str]] = []
+    use_wallet: Optional[bool] = False
+    payment_order_id: Optional[str] = None
+    payment_id: Optional[str] = None
+
+class BookingOrderIn(BaseModel):
+    venue_id: str
+    date: str
+    slot: str
+    num_players: Optional[int] = 1
+    coupons: Optional[List[str]] = []
+    use_wallet: Optional[bool] = False
 
 class Booking(BaseModel):
     booking_id: str
@@ -107,11 +205,32 @@ class Booking(BaseModel):
     base_price: int = 0
     discount_pct: int = 0
     final_total: int = 0
+    wallet_used: int = 0
     per_player: int = 0
     applied_coupons: List[str] = []
     share_token: str = ""
+    qr_code: str = ""
     checked_in: bool = False
+    refund_status: str = "none"
+    refund_amount: int = 0
+    refund_mode: Optional[str] = None
+    refund_requested_at: Optional[str] = None
+    refund_requested_reason: Optional[str] = None
+    refund_admin: Optional[str] = None
+    refund_processed_at: Optional[str] = None
+    refund_processed_mode: Optional[str] = None
+    message: Optional[str] = None
     created_at: str
+
+class BookingRefundIn(BaseModel):
+    amount: Optional[int] = None
+    mode: str = "wallet"
+    reason: Optional[str] = None
+
+class AdminRefundActionIn(BaseModel):
+    action: str
+    mode: Optional[str] = None
+    note: Optional[str] = None
 
 class EventIn(BaseModel):
     title: str
@@ -175,8 +294,160 @@ def verify_pw(pw: str, hashed: str) -> bool:
         return False
 
 def make_jwt(user_id: str) -> str:
-    payload = {"user_id": user_id, "exp": now_utc() + timedelta(days=7)}
+    payload = {"user_id": user_id, "exp": datetime.now(timezone.utc) + timedelta(hours=8)}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+async def send_notification(user_id: Optional[str], venue_id: Optional[str], title: str, message: str, channel: str = "system"):
+    doc = {
+        "notification_id": f"notif_{uuid.uuid4().hex[:10]}",
+        "user_id": user_id,
+        "venue_id": venue_id,
+        "title": title,
+        "message": message,
+        "channel": channel,
+        "read": False,
+        "created_at": iso(now_utc()),
+    }
+    await db.notifications.insert_one(doc)
+    logger.info(f"NOTIFICATION [{channel}] user={user_id} venue={venue_id}: {title} - {message}")
+    return doc
+
+async def credit_wallet(user_id: str, amount: int, reason: str):
+    if amount <= 0:
+        return 0
+    await db.users.update_one({"user_id": user_id}, {"$inc": {"wallet_balance": amount}})
+    await db.wallet_transactions.insert_one({
+        "transaction_id": f"wtx_{uuid.uuid4().hex[:10]}",
+        "user_id": user_id,
+        "amount": amount,
+        "reason": reason,
+        "created_at": iso(now_utc()),
+    })
+    return amount
+
+async def calculate_booking_amount(venue: dict, body: BookingIn, user_doc: dict, consume_scratch: bool = True):
+    base_price = int(venue.get("price_per_hour", 0))
+    num_players = max(1, int(getattr(body, "num_players", 1) or 1))
+    coupons = list(getattr(body, "coupons", []) or [])[:1]
+    discount_pct = 0
+    applied = []
+    user_booking_count = await db.bookings.count_documents({"user_id": user_doc["user_id"], "status": "confirmed"})
+    sub = await db.subscriptions.find_one({"user_id": user_doc["user_id"], "status": "active"})
+    plan_id = sub["plan_id"] if sub else None
+    pass_discount_map = {"premium": 12, "family": 10, "student": 8}
+    if plan_id in pass_discount_map:
+        discount_pct += pass_discount_map[plan_id]
+        applied.append(f"PASS-{plan_id.upper()}")
+    for code in coupons:
+        c = code.upper().strip()
+        if c == "FIRST10" and user_booking_count == 0 and base_price > 100:
+            discount_pct += 10; applied.append("FIRST10")
+        elif c == "LOYAL15" and user_booking_count >= 5:
+            discount_pct += 15; applied.append("LOYAL15")
+        elif c.startswith("SCRATCH-"):
+            sc = await db.scratch_cards.find_one({"code": c, "user_id": user_doc["user_id"], "used": False})
+            if sc:
+                discount_pct += int(sc["discount_pct"])
+                applied.append(c)
+                if consume_scratch:
+                    await db.scratch_cards.update_one({"_id": sc["_id"]}, {"$set": {"used": True}})
+        elif c.startswith("CR-"):
+            creator = await db.creators.find_one({"referral_code": c})
+            if creator:
+                discount_pct += 5; applied.append(c)
+                await db.creators.update_one({"creator_id": creator["creator_id"]}, {"$inc": {"engagement": 5}})
+    discount_pct = min(discount_pct, 40)
+    final_total = int(base_price * (100 - discount_pct) / 100)
+    wallet_balance = int(user_doc.get("wallet_balance", 0) or 0)
+    wallet_used = 0
+    if getattr(body, "use_wallet", False) and wallet_balance > 0:
+        wallet_used = min(wallet_balance, final_total)
+        final_total -= wallet_used
+    per_player = int(round((base_price - (base_price * discount_pct / 100)) / num_players))
+    return {
+        "base_price": base_price,
+        "num_players": num_players,
+        "discount_pct": discount_pct,
+        "final_total": final_total,
+        "per_player": per_player,
+        "applied_coupons": applied,
+        "wallet_used": wallet_used,
+    }
+
+async def create_booking_record(body: BookingIn, user: User, payment_order_id: Optional[str] = None, payment_id: Optional[str] = None):
+    venue = await db.venues.find_one({"venue_id": body.venue_id}, {"_id": 0})
+    if not venue:
+        raise HTTPException(status_code=404, detail="Venue not found")
+    bdate = None
+    try:
+        from datetime import date as _d
+        bdate = _d.fromisoformat(body.date)
+        days_ahead = (bdate - now_utc().date()).days
+        sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active"})
+        plan_id = sub["plan_id"] if sub else None
+        max_days = 14 if plan_id in ("premium", "family", "student") else 7
+        if days_ahead > max_days:
+            raise HTTPException(status_code=403, detail=f"{'Pass holders' if plan_id else 'Normal users'} can only book up to {max_days} days ahead. Upgrade for more.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    conflict = await db.bookings.find_one({"venue_id": body.venue_id, "date": body.date, "slot": body.slot, "status": {"$ne": "cancelled"}})
+    if conflict:
+        raise HTTPException(status_code=409, detail="Slot already booked. Pick another time.")
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    pricing = await calculate_booking_amount(venue, body, user_doc)
+    if pricing["final_total"] > 0 and not payment_id:
+        raise HTTPException(status_code=402, detail="Payment required before booking.")
+    if payment_id and pricing["wallet_used"] > 0:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": -pricing["wallet_used"]}})
+    elif pricing["wallet_used"] > 0 and pricing["final_total"] == 0:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": -pricing["wallet_used"]}})
+    booking_id = f"bk_{uuid.uuid4().hex[:10]}"
+    qr_code = f"QR-{uuid.uuid4().hex[:10].upper()}"
+    doc = {
+        "booking_id": booking_id,
+        "user_id": user.user_id,
+        "venue_id": body.venue_id,
+        "venue_name": venue["name"],
+        "date": body.date,
+        "slot": body.slot,
+        "status": "confirmed",
+        "num_players": pricing["num_players"],
+        "base_price": pricing["base_price"],
+        "discount_pct": pricing["discount_pct"],
+        "final_total": pricing["final_total"],
+        "per_player": pricing["per_player"],
+        "applied_coupons": pricing["applied_coupons"],
+        "wallet_used": pricing["wallet_used"],
+        "share_token": uuid.uuid4().hex[:8],
+        "qr_code": qr_code,
+        "checked_in": False,
+        "refund_status": "none",
+        "refund_amount": 0,
+        "message": f"Booking confirmed. Booking ID {booking_id}. QR code: {qr_code}.",
+        "payment_order_id": payment_order_id,
+        "payment_id": payment_id,
+        "created_at": iso(now_utc()),
+    }
+    await db.bookings.insert_one(doc)
+    await send_notification(user.user_id, venue["venue_id"], "Booking Confirmed", f"Your booking {booking_id} for {venue['name']} is confirmed.")
+    await send_notification(None, venue["venue_id"], "New Booking", f"Venue {venue['name']} has a new booking {booking_id}.")
+    confirmed_bookings = await db.bookings.count_documents({"user_id": user.user_id, "status": "confirmed"})
+    if confirmed_bookings > 0 and confirmed_bookings % 5 == 0:
+        scratch_code = f"SCRATCH-{uuid.uuid4().hex[:8].upper()}"
+        scratch_pct = random.choice([10, 15, 20])
+        await db.scratch_cards.insert_one({
+            "code": scratch_code,
+            "user_id": user.user_id,
+            "discount_pct": scratch_pct,
+            "used": False,
+            "revealed": False,
+            "created_at": iso(now_utc()),
+        })
+        await send_notification(user.user_id, venue["venue_id"], "Scratch card unlocked!", f"You earned a scratch card for {scratch_pct}% off on your next booking. Reveal it from your dashboard.")
+    doc.pop("_id", None)
+    return Booking(**{k: v for k, v in doc.items() if k in Booking.model_fields})
 
 async def current_user(
     request: Request,
@@ -348,6 +619,227 @@ async def owner_status(user: User = Depends(require_user)):
     return {"owner_onboarded": user.owner_onboarded, "role": user.role, "fee": OWNER_ONBOARD_FEE}
 
 
+# ---------- Owner features: sponsor events, notifications, venue edits, badges, messaging ----------
+class SponsorEventIn(BaseModel):
+    name: str
+    phone: str
+    address: str
+    interest_type: str
+
+class VenueEditIn(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+    price_per_hour: Optional[int] = None
+    rating: Optional[float] = None
+    image: Optional[str] = None
+    images: Optional[List[str]] = None
+    amenities: Optional[List[str]] = None
+    description: Optional[str] = None
+    verified: Optional[bool] = None
+
+class SlotToggleIn(BaseModel):
+    date: str
+    slot: str
+
+@api_router.post("/owner/sponsor-events")
+async def create_sponsor_event(body: SponsorEventIn, user: User = Depends(require_user)):
+    doc = body.model_dump()
+    doc.update({"owner_id": user.user_id, "created_at": iso(now_utc())})
+    await db.sponsor_events.insert_one(doc)
+    return {"ok": True}
+
+@api_router.get("/owner/sponsor-events")
+async def list_sponsor_events(user: User = Depends(require_user)):
+    docs = await db.sponsor_events.find({"owner_id": user.user_id}, {"_id": 0}).to_list(100)
+    return docs
+
+@api_router.get("/owner/notifications")
+async def owner_notifications(user: User = Depends(require_user)):
+    venues = await db.venues.find({"owner_id": user.user_id}, {"venue_id": 1, "_id": 0}).to_list(200)
+    venue_ids = [v["venue_id"] for v in venues]
+    docs = await db.notifications.find({"venue_id": {"$in": venue_ids}}, {"_id": 0}).to_list(200)
+    return docs
+
+@api_router.post("/owner/notifications/mark-read")
+async def mark_notification_read(notification_id: str, user: User = Depends(require_user)):
+    await db.notifications.update_one({"notification_id": notification_id, "user_id": user.user_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+@api_router.get("/notifications/me")
+async def my_notifications(user: User = Depends(require_user)):
+    docs = await db.notifications.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return docs
+
+@api_router.post("/notifications/mark-read")
+async def mark_my_notification(notification_id: str, user: User = Depends(require_user)):
+    await db.notifications.update_one({"notification_id": notification_id, "user_id": user.user_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+@api_router.put("/owner/venues/{venue_id}")
+async def edit_venue(venue_id: str, body: VenueEditIn, user: User = Depends(require_user)):
+    v = await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+    if not v:
+        raise HTTPException(status_code=404, detail="Venue not found")
+    if v.get("owner_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    if update:
+        await db.venues.update_one({"venue_id": venue_id}, {"$set": update})
+    updated = await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+    return updated
+
+@api_router.post("/owner/venues/{venue_id}/slots/toggle")
+async def toggle_slot(venue_id: str, body: SlotToggleIn, user: User = Depends(require_user)):
+    v = await db.venues.find_one({"venue_id": venue_id}, {"_id": 0})
+    if not v:
+        raise HTTPException(status_code=404, detail="Venue not found")
+    if v.get("owner_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    disabled = v.get("disabled_slots", [])
+    key = {"date": body.date, "slot": body.slot}
+    if key in disabled:
+        disabled = [d for d in disabled if not (d.get("date")==body.date and d.get("slot")==body.slot)]
+        action = "enabled"
+    else:
+        disabled.append(key)
+        action = "disabled"
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"disabled_slots": disabled}})
+    return {"ok": True, "action": action}
+
+# ---------- Staff auth & QR verification ----------
+class StaffLoginIn(BaseModel):
+    staff_id: str
+    password: str
+
+@api_router.post("/staff/login")
+async def staff_login(body: StaffLoginIn):
+    s = await db.staff.find_one({"staff_id": body.staff_id})
+    if not s:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not bcrypt.checkpw(body.password.encode(), s.get("password_hash").encode()):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = uuid.uuid4().hex
+    await db.staff_sessions.insert_one({"staff_id": body.staff_id, "token": token, "created_at": iso(now_utc())})
+    return {"token": token}
+
+@api_router.post("/staff/verify-qr")
+async def staff_verify_qr(booking_id: str, token: Optional[str] = Header(None)):
+    # simple token check
+    session = await db.staff_sessions.find_one({"token": token})
+    if not session:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    b = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    await db.bookings.update_one({"booking_id": booking_id}, {"$set": {"status": "verified"}})
+    return {"ok": True, "booking": b}
+
+# ---------- Owner-Admin messaging ----------
+class MessageIn(BaseModel):
+    subject: str
+    message: str
+
+@api_router.post("/owner/messages")
+async def owner_message(body: MessageIn, user: User = Depends(require_user)):
+    msg = body.model_dump()
+    msg.update({"from_user": user.user_id, "to": "admin", "replies": [], "created_at": iso(now_utc()), "message_id": f"msg_{uuid.uuid4().hex[:10]}"})
+    await db.messages.insert_one(msg)
+    return {"ok": True}
+
+
+@api_router.get("/owner/messages")
+async def owner_get_messages(user: User = Depends(require_user)):
+    docs = await db.messages.find({"from_user": user.user_id}, {"_id": 0}).to_list(200)
+    return docs
+
+@api_router.get("/admin/messages")
+async def admin_messages(x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    require_admin(x_admin_token)
+    docs = await db.messages.find({}, {"_id": 0}).to_list(200)
+    return docs
+
+@api_router.get("/admin/refunds")
+async def admin_refunds(x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    require_admin(x_admin_token)
+    docs = await db.bookings.find(
+        {"refund_status": {"$in": ["pending", "refunded", "rejected"]}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
+    return {"refunds": docs}
+
+@api_router.post("/admin/refunds/{booking_id}/process")
+async def admin_process_refund(booking_id: str, body: AdminRefundActionIn, x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    require_admin(x_admin_token)
+    if body.action not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Action must be approve or reject")
+    booking = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.get("refund_status") != "pending":
+        raise HTTPException(status_code=400, detail="No pending refund to process")
+
+    update = {
+        "refund_admin": x_admin_token,
+        "refund_admin_note": body.note or "",
+        "refund_processed_at": iso(now_utc()),
+        "refund_processed_mode": body.mode.lower() if body.mode else booking.get("refund_mode"),
+    }
+    if body.action == "approve":
+        approved_mode = update["refund_processed_mode"] or booking.get("refund_mode") or "upi"
+        if approved_mode not in {"wallet", "upi"}:
+            raise HTTPException(status_code=400, detail="Invalid refund mode")
+        update["refund_status"] = "refunded"
+        update["status"] = "cancelled"
+        if approved_mode == "wallet":
+            await credit_wallet(booking["user_id"], booking["refund_amount"], f"Admin-approved refund for booking {booking_id}")
+            await send_notification(booking["user_id"], booking.get("venue_id"), "Refund Completed", f"₹{booking['refund_amount']} credited to wallet for booking {booking_id}.")
+        else:
+            await send_notification(booking["user_id"], booking.get("venue_id"), "Refund Approved", f"UPI refund for booking {booking_id} has been approved and will be processed in 1-2 working days.")
+    else:
+        update["refund_status"] = "rejected"
+        update["status"] = "confirmed"
+        await send_notification(booking["user_id"], booking.get("venue_id"), "Refund Rejected", f"Refund request for booking {booking_id} was rejected by admin.")
+
+    await db.bookings.update_one({"booking_id": booking_id}, {"$set": update})
+    return {"ok": True, "refund_status": update["refund_status"], "refund_processed_mode": update["refund_processed_mode"]}
+
+
+@api_router.get("/admin/sponsor-events")
+async def admin_sponsor_events(x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    require_admin(x_admin_token)
+    docs = await db.sponsor_events.find({}, {"_id": 0}).to_list(500)
+    return docs
+
+@api_router.post("/admin/messages/{message_id}/reply")
+async def admin_reply(message_id: str, reply: str, x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    require_admin(x_admin_token)
+    r = {"admin_token": x_admin_token, "reply": reply, "created_at": iso(now_utc())}
+    await db.messages.update_one({"message_id": message_id}, {"$push": {"replies": r}})
+    return {"ok": True}
+
+# ---------- Badges / Gamification ----------
+@api_router.get("/owner/badges")
+async def owner_badges(user: User = Depends(require_user)):
+    venues = await db.venues.find({"owner_id": user.user_id}, {"venue_id": 1, "name": 1, "_id": 0}).to_list(200)
+    venue_ids = [v["venue_id"] for v in venues]
+    # compute bookings per venue
+    counts = {}
+    for vid in venue_ids:
+        c = await db.bookings.count_documents({"venue_id": vid})
+        counts[vid] = c
+    if counts:
+        top_vid = max(counts, key=counts.get)
+        top_name = next((v["name"] for v in venues if v["venue_id"]==top_vid), top_vid)
+        badges = [
+            {"badge": "Most Booked Venue", "venue_id": top_vid, "venue_name": top_name, "value": counts[top_vid]},
+        ]
+    else:
+        badges = []
+    return {"badges": badges}
+
+
 @api_router.get("/venues", response_model=List[Venue])
 async def list_venues(category: Optional[str] = None, city: Optional[str] = None, sort: Optional[str] = None):
     q = {}
@@ -392,102 +884,161 @@ async def get_venue(venue_id: str):
 # ---------- Bookings ----------
 @api_router.post("/bookings", response_model=Booking)
 async def create_booking(body: BookingIn, user: User = Depends(require_user)):
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    booking = await create_booking_record(body, user, body.payment_order_id, body.payment_id)
+    if booking.wallet_used > 0 and booking.final_total == 0:
+        await send_notification(user.user_id, booking.venue_id, "Wallet payment used", f"₹{booking.wallet_used} used from wallet for booking {booking.booking_id}.")
+    return booking
+
+@api_router.post("/payments/booking/order")
+async def create_booking_order(body: BookingOrderIn, user: User = Depends(require_user)):
     venue = await db.venues.find_one({"venue_id": body.venue_id}, {"_id": 0})
     if not venue:
         raise HTTPException(status_code=404, detail="Venue not found")
-    # SLOT LOCK: prevent double-booking
-    existing = await db.bookings.find_one({"venue_id": body.venue_id, "date": body.date, "slot": body.slot, "status": {"$ne": "cancelled"}})
-    if existing:
-        raise HTTPException(status_code=409, detail="Slot already booked. Pick another time.")
-
-    # PREMIUM early-access on weekends (Fri/Sat/Sun) — non-premium can only book within 6 days
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    pricing = await calculate_booking_amount(venue, body, user_doc, consume_scratch=False)
+    if pricing["final_total"] <= 0:
+        return {"ok": True, "amount": 0, "currency": "INR", "order_id": None}
+    if not rzp_client:
+        raise HTTPException(503, "Razorpay not configured")
+    amount_paise = int(pricing["final_total"]) * 100
+    receipt = f"pizo-booking-{uuid.uuid4().hex[:8]}"
+    notes = {"user_id": user.user_id, "purpose": "booking", "venue_id": body.venue_id, "date": body.date, "slot": body.slot}
     try:
-        from datetime import date as _d
-        bdate = _d.fromisoformat(body.date)
-        days_ahead = (bdate - now_utc().date()).days
-        # Get user's active subscription
-        sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active"})
-        plan_id = sub["plan_id"] if sub else None
-        # Normal user: max 7 days ahead. Pass holders: 14 days ahead
-        max_days = 14 if plan_id in ("premium", "family", "student") else 7
-        if days_ahead > max_days:
-            raise HTTPException(status_code=403, detail=f"{'Pass holders' if plan_id else 'Normal users'} can only book up to {max_days} days ahead. Upgrade for more.")
-    except HTTPException: raise
-    except Exception: pass
-
-    base_price = int(venue.get("price_per_hour", 0))
-    num_players = max(1, int(getattr(body, "num_players", 1) or 1))
-
-    # Apply coupons (max 2)
-    coupons = list(getattr(body, "coupons", []) or [])[:2]
-    discount_pct = 0
-    applied = []
-    user_booking_count = await db.bookings.count_documents({"user_id": user.user_id})
-
-    # Auto pass-based discount: Premium 12%, Family 10%, Student 8%
-    pass_discount_map = {"premium": 12, "family": 10, "student": 8}
-    if plan_id in pass_discount_map:
-        discount_pct += pass_discount_map[plan_id]
-        applied.append(f"PASS-{plan_id.upper()}")
-
-    for code in coupons:
-        c = code.upper().strip()
-        if c == "FIRST10" and user_booking_count == 0 and base_price > 100:
-            discount_pct += 10; applied.append("FIRST10")
-        elif c == "LOYAL15" and user_booking_count >= 5:
-            discount_pct += 15; applied.append("LOYAL15")
-        elif c.startswith("SCRATCH-"):
-            sc = await db.scratch_cards.find_one({"code": c, "user_id": user.user_id, "used": False})
-            if sc:
-                discount_pct += int(sc["discount_pct"])
-                applied.append(c)
-                await db.scratch_cards.update_one({"_id": sc["_id"]}, {"$set": {"used": True}})
-        elif c.startswith("CR-"):
-            creator = await db.creators.find_one({"referral_code": c})
-            if creator:
-                discount_pct += 5; applied.append(c)
-                await db.creators.update_one({"creator_id": creator["creator_id"]}, {"$inc": {"engagement": 5}})
-    discount_pct = min(discount_pct, 40)
-    final_total = int(base_price * (100 - discount_pct) / 100)
-    per_player = int(round(final_total / num_players))
-
-    booking_id = f"bk_{uuid.uuid4().hex[:10]}"
-    share_token = uuid.uuid4().hex[:8]
-    doc = {
-        "booking_id": booking_id,
-        "user_id": user.user_id,
-        "venue_id": body.venue_id,
-        "venue_name": venue["name"],
-        "date": body.date,
-        "slot": body.slot,
-        "status": "confirmed",
-        "num_players": num_players,
-        "base_price": base_price,
-        "discount_pct": discount_pct,
-        "final_total": final_total,
-        "per_player": per_player,
-        "applied_coupons": applied,
-        "share_token": share_token,
-        "checked_in": False,
-        "created_at": iso(now_utc()),
-    }
-    await db.bookings.insert_one(doc)
-
-    # SCRATCH REWARD on every 5th booking
-    new_count = user_booking_count + 1
-    scratch = None
-    if new_count % 5 == 0:
-        import random
-        pct = random.choice([10, 12, 15, 18, 20])
-        code = f"SCRATCH-{uuid.uuid4().hex[:6].upper()}"
-        await db.scratch_cards.insert_one({
-            "code": code, "user_id": user.user_id, "discount_pct": pct,
-            "used": False, "revealed": False, "created_at": iso(now_utc()),
+        order = rzp_client.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": receipt[:40],
+            "payment_capture": 1,
+            "notes": notes,
         })
-        scratch = {"code": code, "discount_pct": pct}
+    except Exception as e:
+        logger.error(f"Booking order create failed: {e}")
+        raise HTTPException(502, "Payment provider error")
+    await db.rzp_orders.insert_one({
+        "order_id": order["id"],
+        "user_id": user.user_id,
+        "amount": pricing["final_total"],
+        "purpose": "booking",
+        "booking_payload": body.model_dump(),
+        "status": "created",
+        "created_at": iso(now_utc()),
+    })
+    return {
+        "ok": True,
+        "order_id": order["id"],
+        "amount": order["amount"],
+        "currency": order["currency"],
+        "key_id": RAZORPAY_KEY_ID,
+    }
 
-    doc.pop("_id", None)
-    return Booking(**{k: v for k, v in doc.items() if k in Booking.model_fields})
+@api_router.post("/merch/purchase")
+async def purchase_merch(body: dict, user: User = Depends(require_user)):
+    item_id = body.get("item_id")
+    use_wallet = bool(body.get("use_wallet"))
+    if not item_id:
+        raise HTTPException(status_code=400, detail="Item ID required")
+    item = next((m for m in MERCH if m["id"] == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Merch item not found")
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    price = await get_merch_price(user_doc, item)
+    wallet_balance = int(user_doc.get("wallet_balance", 0) or 0)
+    if use_wallet and wallet_balance >= price:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": -price}})
+        order_doc = {
+            "order_id": f"mo_{uuid.uuid4().hex[:10]}",
+            "user_id": user.user_id,
+            "item_id": item_id,
+            "item_name": item["name"],
+            "amount": price,
+            "payment_type": "wallet",
+            "status": "paid",
+            "created_at": iso(now_utc()),
+        }
+        await db.merch_orders.insert_one(order_doc)
+        await send_notification(user.user_id, None, "Merch purchased", f"You bought {item['name']} for ₹{price} using wallet.")
+        return {"ok": True, "order": order_doc}
+    if use_wallet:
+        raise HTTPException(status_code=400, detail="Insufficient wallet balance for this item")
+    raise HTTPException(status_code=400, detail="Use Razorpay checkout for merch purchase")
+
+@api_router.get("/me/merch/orders")
+async def my_merch_orders(user: User = Depends(require_user)):
+    orders = await db.merch_orders.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {"orders": orders}
+
+@api_router.post("/bookings/{booking_id}/refund")
+async def refund_booking(booking_id: str, body: BookingRefundIn, user: User = Depends(require_user)):
+    b = await db.bookings.find_one({"booking_id": booking_id, "user_id": user.user_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if b.get("status") != "confirmed":
+        raise HTTPException(status_code=400, detail="Only confirmed bookings can be refunded")
+    if b.get("refund_status") not in ("none", "rejected"):
+        raise HTTPException(status_code=400, detail="Refund already requested or processed")
+    refund_amount = body.amount or b.get("final_total", 0)
+    if refund_amount <= 0 or refund_amount > b.get("final_total", 0):
+        raise HTTPException(status_code=400, detail="Invalid refund amount")
+    refund_mode = (body.mode or "wallet").lower()
+    if refund_mode not in {"wallet", "upi"}:
+        raise HTTPException(status_code=400, detail="Refund mode must be 'wallet' or 'upi'")
+
+    update = {
+        "refund_amount": refund_amount,
+        "refund_mode": refund_mode,
+        "refund_requested_at": iso(now_utc()),
+        "refund_requested_reason": body.reason or "",
+        "refund_requested_by": user.user_id,
+        "refund_admin": None,
+    }
+
+    if refund_mode == "wallet":
+        await credit_wallet(user.user_id, refund_amount, f"Refund for booking {booking_id}")
+        update.update({
+            "refund_status": "refunded",
+            "refund_processed_at": iso(now_utc()),
+            "refund_processed_mode": "wallet",
+            "status": "cancelled",
+        })
+        await send_notification(user.user_id, b.get("venue_id"), "Refund Completed", f"₹{refund_amount} credited to your wallet for booking {booking_id}.")
+    else:
+        update.update({
+            "refund_status": "pending",
+            "refund_processed_at": None,
+            "refund_processed_mode": None,
+            "status": "refund_pending",
+        })
+        await send_notification(user.user_id, b.get("venue_id"), "Refund Requested", f"Refund request for booking {booking_id} is pending admin approval. UPI payout may take 1-2 working days.")
+
+    await db.bookings.update_one({"booking_id": booking_id}, {"$set": update})
+    return {
+        "ok": True,
+        "refund_status": update["refund_status"],
+        "refund_mode": refund_mode,
+        "refund_amount": refund_amount,
+    }
+
+class BookingRescheduleIn(BaseModel):
+    date: str
+    slot: str
+
+@api_router.post("/bookings/{booking_id}/reschedule")
+async def reschedule_booking(booking_id: str, body: BookingRescheduleIn, user: User = Depends(require_user)):
+    b = await db.bookings.find_one({"booking_id": booking_id, "user_id": user.user_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if b.get("status") != "confirmed":
+        raise HTTPException(status_code=400, detail="Only confirmed bookings can be rescheduled")
+    venue = await db.venues.find_one({"venue_id": b["venue_id"]}, {"_id": 0})
+    if not venue or not venue.get("reschedule_allowed", True):
+        raise HTTPException(status_code=403, detail="Reschedule not allowed for this venue")
+    conflict = await db.bookings.find_one({"venue_id": b["venue_id"], "date": body.date, "slot": body.slot, "status": {"$ne": "cancelled"}})
+    if conflict:
+        raise HTTPException(status_code=409, detail="New slot already booked")
+    await db.bookings.update_one({"booking_id": booking_id}, {"$set": {"date": body.date, "slot": body.slot, "message": f"Rescheduled to {body.date} {body.slot}. Booking ID {booking_id}.", "status": "confirmed"}})
+    await send_notification(user.user_id, b.get("venue_id"), "Booking Rescheduled", f"Your booking {booking_id} was rescheduled to {body.date} {body.slot}.")
+    return {"ok": True, "date": body.date, "slot": body.slot}
 
 @api_router.get("/bookings/me", response_model=List[Booking])
 async def my_bookings(user: User = Depends(require_user)):
@@ -624,6 +1175,15 @@ MERCH = [
     {"id":"m6","name":"Crew Wristband","price":299,"image":"https://images.unsplash.com/photo-1622445275576-721325763afe?w=600","category":"accessory"},
 ]
 
+async def get_merch_price(user_doc: dict, item: dict) -> int:
+    price = int(item["price"])
+    if not user_doc:
+        return price
+    sub = await db.subscriptions.find_one({"user_id": user_doc["user_id"], "status": "active", "plan_id": {"$in": ["premium", "family"]}})
+    if sub:
+        return int(price * 0.9)
+    return price
+
 @api_router.get("/merch")
 async def list_merch(user: User = Depends(require_user)):
     sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": {"$in": ["premium","family"]}})
@@ -638,7 +1198,19 @@ async def list_merch(user: User = Depends(require_user)):
         items.append(m2)
     return {"is_premium": is_premium, "items": items}
 
-# ---------- Creator join + referral ----------
+
+@api_router.post("/merch/add")
+async def add_to_chest(body: dict, user: User = Depends(require_user)):
+    item_id = body.get("item_id")
+    if not item_id:
+        raise HTTPException(status_code=400, detail="item_id required")
+    # verify exists
+    found = next((m for m in MERCH if m["id"] == item_id), None)
+    if not found:
+        raise HTTPException(status_code=404, detail="Merch item not found")
+    await db.user_chest.insert_one({"user_id": user.user_id, "item_id": item_id, "added_at": iso(now_utc())})
+    return {"ok": True}
+
 class CreatorJoinIn(BaseModel):
     name: str
     phone: str
@@ -656,12 +1228,17 @@ async def creator_join(body: CreatorJoinIn, user: User = Depends(require_user)):
     doc = {
         "creator_id": f"cr_{uuid.uuid4().hex[:10]}",
         "user_id": user.user_id,
-        "name": body.name, "handle": body.instagram, "phone": body.phone,
-        "instagram": body.instagram, "youtube": body.youtube,
-        "avatar": user.picture or f"https://i.pravatar.cc/300?u={user.user_id}",
-        "bio": body.bio, "category": body.category,
-        "engagement": 0, "consistency": 0, "quality": 0,
-        "points": 0, "badges": ["Rookie"], "rank": 0,
+        "name": body.name,
+        "handle": body.instagram,
+        "phone": body.phone,
+        "bio": body.bio,
+        "category": body.category,
+        "engagement": 0,
+        "consistency": 0,
+        "quality": 0,
+        "points": 0,
+        "badges": ["Rookie"],
+        "rank": 0,
         "referral_code": referral,
         "video_links": [],
         "created_at": iso(now_utc()),
@@ -707,20 +1284,60 @@ async def owner_analytics(user: User = Depends(require_user)):
 
 class StaffIn(BaseModel):
     name: str
+    password: Optional[str] = None
 
 @api_router.post("/owner/staff")
 async def create_staff(body: StaffIn, user: User = Depends(require_user)):
+    # Only owners may create staff
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Only owners may create staff")
     token = f"STAFF-{uuid.uuid4().hex[:16]}"
-    doc = {"staff_id": f"st_{uuid.uuid4().hex[:8]}", "owner_id": user.user_id,
-           "name": body.name, "scan_token": token, "created_at": iso(now_utc())}
+    plain_password = body.password or uuid.uuid4().hex[:8]
+    doc = {
+        "staff_id": f"st_{uuid.uuid4().hex[:8]}",
+        "owner_id": user.user_id,
+        "name": body.name,
+        "password_hash": hash_pw(plain_password),
+        "scan_token": token,
+        "created_at": iso(now_utc()),
+    }
     await db.staff.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+    return {
+        "staff_id": doc["staff_id"],
+        "name": doc["name"],
+        "scan_token": doc["scan_token"],
+        "password": plain_password,
+        "created_at": doc["created_at"],
+    }
 
 @api_router.get("/owner/staff")
 async def list_staff(user: User = Depends(require_user)):
-    docs = await db.staff.find({"owner_id": user.user_id}, {"_id": 0}).to_list(50)
+    docs = await db.staff.find({"owner_id": user.user_id}, {"_id": 0, "password_hash": 0}).to_list(50)
     return docs
+
+@api_router.delete("/owner/staff/{staff_id}")
+async def delete_staff(staff_id: str, user: User = Depends(require_user)):
+    # Only owners may delete their own staff; return proper status codes
+    try:
+        if user.role != "owner":
+            raise HTTPException(status_code=403, detail="Not allowed")
+        # perform ownership-aware delete to avoid revealing other owners' staff
+        res = await db.staff.delete_one({"staff_id": staff_id, "owner_id": user.user_id})
+        if getattr(res, "deleted_count", None) == 0:
+            # either not found or not owned by this user
+            # check if staff exists to differentiate 404 vs 403
+            existing = await db.staff.find_one({"staff_id": staff_id})
+            if existing:
+                raise HTTPException(status_code=403, detail="Not allowed to delete this staff")
+            raise HTTPException(status_code=404, detail="Staff member not found")
+        await db.staff_sessions.delete_many({"staff_id": staff_id})
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting staff")
+        # Return the underlying error message to help debug 500s during development
+        raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/staff/scan")
 async def staff_scan(payload: dict):
@@ -797,11 +1414,12 @@ async def root():
 # ---------- Admin (token-gated) ----------
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "pizo-admin-2026")
 
-def require_admin(x_admin_token: Optional[str] = Header(None)):
+def require_admin(x_admin_token: str = Header(..., alias="X-Admin-Token")):
     if x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(401, "Admin token required")
+        raise HTTPException(status_code=401, detail="Admin token required")
     return True
 
+# ---------- Overview ----------
 @api_router.get("/admin/overview")
 async def admin_overview(_: bool = Depends(require_admin)):
     return {
@@ -812,93 +1430,13 @@ async def admin_overview(_: bool = Depends(require_admin)):
         "subscriptions": await db.subscriptions.count_documents({"status":"active"}),
         "contacts": await db.contacts.count_documents({}),
         "creators": await db.creators.count_documents({}),
+        "owners": await db.users.count_documents({"role":"owner"}),
+        "events": await db.events.count_documents({}),
+        "plans": await db.subscriptions.count_documents({}),
+        "merch": len(MERCH),
     }
 
-@api_router.get("/admin/venues")
-async def admin_venues(_: bool = Depends(require_admin)):
-    return await db.venues.find({}, {"_id": 0}).to_list(500)
-
-@api_router.post("/admin/venues/{venue_id}/verify")
-async def admin_verify(venue_id: str, _: bool = Depends(require_admin)):
-    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": True}})
-    return {"ok": True}
-
-@api_router.post("/admin/venues/{venue_id}/unverify")
-async def admin_unverify(venue_id: str, _: bool = Depends(require_admin)):
-    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": False}})
-    return {"ok": True}
-
-@api_router.get("/admin/contacts")
-async def admin_contacts(_: bool = Depends(require_admin)):
-    return await db.contacts.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
-
-# ---------- Admin: Users CRUD ----------
-class AdminUserUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    role: Optional[str] = None  # user / owner / admin
-    owner_onboarded: Optional[bool] = None
-    picture: Optional[str] = None
-
-@api_router.get("/admin/users")
-async def admin_users(_: bool = Depends(require_admin), role: Optional[str] = None):
-    q = {}
-    if role: q["role"] = role
-    docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(1000)
-    return docs
-
-@api_router.put("/admin/users/{user_id}")
-async def admin_update_user(user_id: str, body: AdminUserUpdate, _: bool = Depends(require_admin)):
-    upd = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not upd:
-        raise HTTPException(400, "No fields to update")
-    r = await db.users.update_one({"user_id": user_id}, {"$set": upd})
-    if r.matched_count == 0: raise HTTPException(404, "User not found")
-    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
-    return u
-
-@api_router.delete("/admin/users/{user_id}")
-async def admin_delete_user(user_id: str, _: bool = Depends(require_admin)):
-    r = await db.users.delete_one({"user_id": user_id})
-    if r.deleted_count == 0: raise HTTPException(404, "User not found")
-    # cascade: their subscriptions, bookings, creator profile
-    await db.subscriptions.delete_many({"user_id": user_id})
-    await db.bookings.delete_many({"user_id": user_id})
-    await db.creators.delete_many({"user_id": user_id})
-    return {"ok": True}
-
-# ---------- Admin: Creators CRUD ----------
-class AdminCreatorUpdate(BaseModel):
-    name: Optional[str] = None
-    handle: Optional[str] = None
-    bio: Optional[str] = None
-    category: Optional[str] = None
-    engagement: Optional[int] = None
-    consistency: Optional[int] = None
-    quality: Optional[int] = None
-    avatar: Optional[str] = None
-    badges: Optional[List[str]] = None
-
-@api_router.get("/admin/creators")
-async def admin_creators(_: bool = Depends(require_admin)):
-    docs = await db.creators.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return docs
-
-@api_router.put("/admin/creators/{creator_id}")
-async def admin_update_creator(creator_id: str, body: AdminCreatorUpdate, _: bool = Depends(require_admin)):
-    upd = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not upd: raise HTTPException(400, "No fields to update")
-    r = await db.creators.update_one({"creator_id": creator_id}, {"$set": upd})
-    if r.matched_count == 0: raise HTTPException(404, "Creator not found")
-    return await db.creators.find_one({"creator_id": creator_id}, {"_id": 0})
-
-@api_router.delete("/admin/creators/{creator_id}")
-async def admin_delete_creator(creator_id: str, _: bool = Depends(require_admin)):
-    r = await db.creators.delete_one({"creator_id": creator_id})
-    if r.deleted_count == 0: raise HTTPException(404, "Creator not found")
-    return {"ok": True}
-
-# ---------- Admin: Venues full CRUD ----------
+# ---------- Venues CRUD ----------
 class AdminVenueUpdate(BaseModel):
     name: Optional[str] = None
     category: Optional[str] = None
@@ -912,6 +1450,10 @@ class AdminVenueUpdate(BaseModel):
     description: Optional[str] = None
     verified: Optional[bool] = None
     owner_id: Optional[str] = None
+
+@api_router.get("/admin/venues")
+async def admin_venues(_: bool = Depends(require_admin)):
+    return await db.venues.find({}, {"_id": 0}).to_list(500)
 
 @api_router.post("/admin/venues")
 async def admin_create_venue(body: VenueIn, _: bool = Depends(require_admin)):
@@ -938,12 +1480,210 @@ async def admin_delete_venue(venue_id: str, _: bool = Depends(require_admin)):
     await db.bookings.delete_many({"venue_id": venue_id})
     return {"ok": True}
 
+@api_router.post("/admin/venues/{venue_id}/verify")
+async def admin_verify(venue_id: str, _: bool = Depends(require_admin)):
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": True}})
+    return {"ok": True}
+
+@api_router.post("/admin/venues/{venue_id}/unverify")
+async def admin_unverify(venue_id: str, _: bool = Depends(require_admin)):
+    await db.venues.update_one({"venue_id": venue_id}, {"$set": {"verified": False}})
+    return {"ok": True}
+
+# ---------- Users CRUD ----------
+class AdminUserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    owner_onboarded: Optional[bool] = None
+    picture: Optional[str] = None
+
+@api_router.get("/admin/users")
+async def admin_users(_: bool = Depends(require_admin), role: Optional[str] = None):
+    q = {}
+    if role: q["role"] = role
+    return await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(1000)
+
+@api_router.put("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, body: AdminUserUpdate, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.users.update_one({"user_id": user_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "User not found")
+    return await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, _: bool = Depends(require_admin)):
+    r = await db.users.delete_one({"user_id": user_id})
+    if r.deleted_count == 0: raise HTTPException(404, "User not found")
+    await db.subscriptions.delete_many({"user_id": user_id})
+    await db.bookings.delete_many({"user_id": user_id})
+    await db.creators.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+# ---------- Owners CRUD ----------
+@api_router.get("/admin/owners")
+async def admin_owners(_: bool = Depends(require_admin)):
+    return await db.users.find({"role":"owner"}, {"_id":0,"password_hash":0}).to_list(500)
+
+@api_router.put("/admin/owners/{user_id}")
+async def admin_update_owner(user_id: str, body: dict, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.users.update_one({"user_id": user_id, "role":"owner"}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Owner not found")
+    return await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+
+@api_router.delete("/admin/owners/{user_id}")
+async def admin_delete_owner(user_id: str, _: bool = Depends(require_admin)):
+    r = await db.users.delete_one({"user_id": user_id, "role":"owner"})
+    if r.deleted_count == 0: raise HTTPException(404, "Owner not found")
+    await db.venues.delete_many({"owner_id": user_id})
+    await db.bookings.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+# ---------- Merch CRUD ----------
+@api_router.get("/admin/merch")
+async def admin_merch(_: bool = Depends(require_admin)):
+    return MERCH
+
+@api_router.post("/admin/merch")
+async def admin_add_merch(body: dict, _: bool = Depends(require_admin)):
+    global MERCH
+    new_item = {
+        "id": f"m{uuid.uuid4().hex[:6]}",
+        "name": body["name"],
+        "price": body["price"],
+        "image": body["image"],
+        "category": body.get("category","misc")
+    }
+    MERCH.append(new_item)
+    return new_item
+
+@api_router.put("/admin/merch/{id}")
+async def admin_update_merch(id: str, body: dict, _: bool = Depends(require_admin)):
+    global MERCH
+    for m in MERCH:
+        if m["id"] == id:
+            m.update(body)
+            return m
+    raise HTTPException(404, "Merch not found")
+
+@api_router.delete("/admin/merch/{id}")
+async def admin_delete_merch(id: str, _: bool = Depends(require_admin)):
+    global MERCH
+    MERCH = [m for m in MERCH if m["id"] != id]
+    return {"ok": True}
+
+# ---------- Plans CRUD ----------
+@api_router.get("/admin/plans")
+async def admin_plans(_: bool = Depends(require_admin)):
+    return await db.subscriptions.find({}, {"_id":0}).to_list(500)
+
+@api_router.post("/admin/plans")
+async def admin_add_plan(body: dict, _: bool = Depends(require_admin)):
+    plan_id = f"plan_{uuid.uuid4().hex[:8]}"
+    doc = {
+        "plan_id": plan_id,
+        "plan_name": body["plan_name"],
+        "amount": body["amount"],
+        "benefits": body.get("benefits", []),
+        "created_at": iso(now_utc())
+    }
+    await db.subscriptions.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.put("/admin/plans/{plan_id}")
+async def admin_update_plan(plan_id: str, body: dict, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.subscriptions.update_one({"plan_id": plan_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Plan not found")
+    return await db.subscriptions.find_one({"plan_id": plan_id}, {"_id": 0})
+
+@api_router.delete("/admin/plans/{plan_id}")
+async def admin_delete_plan(plan_id: str, _: bool = Depends(require_admin)):
+    await db.subscriptions.delete_many({"plan_id": plan_id})
+    return {"ok": True}
+
+# ---------- Events CRUD ----------
+@api_router.post("/admin/events")
+async def admin_add_event(body: EventIn, _: bool = Depends(require_admin)):
+    event_id = f"ev_{uuid.uuid4().hex[:10]}"
+    doc = body.model_dump()
+    doc.update({"event_id": event_id, "created_at": iso(now_utc())})
+    await db.events.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/admin/events")
+async def admin_events(_: bool = Depends(require_admin)):
+    return await db.events.find({}, {"_id": 0}).to_list(500)
+
+
+@api_router.put("/admin/events/{event_id}")
+async def admin_update_event(event_id: str, body: EventIn, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.events.update_one({"event_id": event_id}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Event not found")
+    return await db.events.find_one({"event_id": event_id}, {"_id": 0})
+
+@api_router.delete("/admin/events/{event_id}")
+async def admin_delete_event(event_id: str, _: bool = Depends(require_admin)):
+    r = await db.events.delete_one({"event_id": event_id})
+    if r.deleted_count == 0: raise HTTPException(404, "Event not found")
+    await db.event_regs.delete_many({"event_id": event_id})
+    return {"ok": True}
+
+# ---------- creators CRUD ----------
+@api_router.post("/admin/creators")
+async def admin_add_creator(body: CreatorIn, _: bool = Depends(require_admin)):
+    creator_id = f"cr_{uuid.uuid4().hex[:10]}"
+    doc = body.model_dump()
+    doc.update({"creator_id": creator_id, "created_at": iso(now_utc())})
+    await db.creators.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/admin/creators")
+async def admin_creators(_: bool = Depends(require_admin)):
+    return await db.creators.find({}, {"_id": 0}).to_list(500)
+
+# ---------- owners CRUD ----------
+@api_router.put("/admin/owners/{user_id}")
+async def admin_update_owner(user_id: str, body: dict, _: bool = Depends(require_admin)):
+    upd = {k: v for k, v in body.items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields to update")
+    r = await db.users.update_one({"user_id": user_id, "role":"owner"}, {"$set": upd})
+    if r.matched_count == 0: raise HTTPException(404, "Owner not found")
+    return await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+
+# ----------contacts CRUD ----------
+@api_router.delete("/admin/contacts/{contact_id}")
+async def admin_delete_contact(contact_id: str, _: bool = Depends(require_admin)):
+    r = await db.contacts.delete_one({"contact_id": contact_id})
+    if r.deleted_count == 0: raise HTTPException(404, "Contact not found")
+    return {"ok": True}
+
+@api_router.get("/admin/contacts")
+async def admin_contacts(_: bool = Depends(require_admin)):
+    return await db.contacts.find(
+        {}, 
+        {"_id": 0, "contact_id": 1, "name": 1, "email": 1, "message": 1}
+    ).to_list(500)
+
+
+
+
 # ---------- Razorpay payments ----------
 class RzpOrderIn(BaseModel):
     amount: int  # rupees
-    purpose: str  # subscription / owner_onboard
+    purpose: str  # subscription / owner_onboard / merch_purchase / wallet_topup
     plan_id: Optional[str] = None
     notes: Optional[dict] = None
+    purchase_payload: Optional[dict] = None
 
 @api_router.get("/payments/razorpay/config")
 async def razorpay_config():
@@ -975,6 +1715,8 @@ async def create_rzp_order(body: RzpOrderIn, user: User = Depends(require_user))
         "amount": body.amount,
         "purpose": body.purpose,
         "plan_id": body.plan_id,
+        "notes": body.notes or {},
+        "purchase_payload": body.purchase_payload or {},
         "status": "created",
         "created_at": iso(now_utc()),
     })
@@ -993,6 +1735,8 @@ class RzpVerifyIn(BaseModel):
     razorpay_signature: str
     purpose: str
     plan_id: Optional[str] = None
+    booking_payload: Optional[dict] = None
+    purchase_payload: Optional[dict] = None
 
 def verify_rzp_signature(order_id: str, payment_id: str, signature: str) -> bool:
     body = f"{order_id}|{payment_id}".encode()
@@ -1041,6 +1785,48 @@ async def verify_rzp_payment(body: RzpVerifyIn, user: User = Depends(require_use
         )
         u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "password_hash": 0})
         return {"ok": True, "user": u}
+    elif body.purpose == "booking":
+        if not body.booking_payload:
+            raise HTTPException(status_code=400, detail="Booking payload required")
+        booking_request = BookingIn.model_validate(body.booking_payload)
+        booking = await create_booking_record(booking_request, user, body.razorpay_order_id, body.razorpay_payment_id)
+        return {"ok": True, "booking": booking}
+    elif body.purpose == "merch_purchase":
+        if not body.purchase_payload:
+            raise HTTPException(status_code=400, detail="Purchase payload required")
+        item_id = body.purchase_payload.get("item_id")
+        if not item_id:
+            raise HTTPException(status_code=400, detail="Item ID required")
+        item = next((m for m in MERCH if m["id"] == item_id), None)
+        if not item:
+            raise HTTPException(status_code=404, detail="Merch item not found")
+        price = await get_merch_price(user.model_dump(), item) if isinstance(user, User) else item["price"]
+        order_doc = {
+            "order_id": f"mo_{uuid.uuid4().hex[:10]}",
+            "user_id": user.user_id,
+            "item_id": item_id,
+            "item_name": item["name"],
+            "amount": price,
+            "payment_type": "razorpay",
+            "payment_id": body.razorpay_payment_id,
+            "order_reference_id": body.razorpay_order_id,
+            "status": "paid",
+            "created_at": iso(now_utc()),
+        }
+        await db.merch_orders.insert_one(order_doc)
+        await send_notification(user.user_id, None, "Merch purchase confirmed", f"You bought {item['name']} for ₹{price}.")
+        return {"ok": True, "order": order_doc}
+    elif body.purpose == "wallet_topup":
+        # Credit user's wallet with the amount recorded in rzp_orders
+        order = await db.rzp_orders.find_one({"order_id": body.razorpay_order_id})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        amount = int(order.get("amount", 0))
+        if amount <= 0:
+            return {"ok": True}
+        await credit_wallet(user.user_id, amount, f"Wallet top-up via Razorpay {body.razorpay_payment_id}")
+        await db.rzp_orders.update_one({"order_id": body.razorpay_order_id}, {"$set": {"status": "paid", "payment_id": body.razorpay_payment_id, "paid_at": iso(now_utc())}})
+        return {"ok": True, "credited": amount}
     return {"ok": True}
 
 # ---------- File uploads (local storage, served via /api/uploads/<file>) ----------
@@ -1183,8 +1969,9 @@ async def delete_my_venue(venue_id: str, user: User = Depends(require_user)):
 
 # ---------- Seed ----------
 async def seed_data():
-    if await db.venues.count_documents({}) == 0:
-        venues = [
+    try:
+        if await db.venues.count_documents({}) == 0:
+            venues = [
             {"name": "Pirate's Cove Turf", "category": "turf", "city": "Mumbai", "address": "Bandra West", "price_per_hour": 1200, "rating": 4.8, "image": "https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", "amenities": ["Floodlights", "Parking", "Cafe"], "description": "Premium 5-a-side football turf with FIFA-grade grass.", "owner_id": None},
             {"name": "Crimson Cue Billiards", "category": "billiards", "city": "Mumbai", "address": "Andheri East", "price_per_hour": 400, "rating": 4.7, "image": "https://images.pexels.com/photos/5055749/pexels-photo-5055749.jpeg", "amenities": ["AC", "Lounge", "Snacks"], "description": "8 pool & snooker tables in a chill, retro-lit lounge.", "owner_id": None},
             {"name": "Kraken Gaming Lounge", "category": "gaming", "city": "Bangalore", "address": "Indiranagar", "price_per_hour": 250, "rating": 4.9, "image": "https://images.pexels.com/photos/9072386/pexels-photo-9072386.jpeg", "amenities": ["RTX 4080 PCs", "PS5", "Energy Drinks"], "description": "Esports-grade rigs, 240Hz monitors, full BGMI/Valorant rooms.", "owner_id": None},
@@ -1192,35 +1979,38 @@ async def seed_data():
             {"name": "Galleon Football Park", "category": "turf", "city": "Bangalore", "address": "HSR Layout", "price_per_hour": 1500, "rating": 4.7, "image": "https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", "amenities": ["Floodlights", "Showers"], "description": "Two 7-a-side turfs with night-game lighting.", "owner_id": None},
             {"name": "Black Pearl Esports", "category": "gaming", "city": "Mumbai", "address": "Powai", "price_per_hour": 300, "rating": 4.8, "image": "https://images.pexels.com/photos/9072386/pexels-photo-9072386.jpeg", "amenities": ["RGB Setup", "VR Room", "Cafe"], "description": "Tournament-ready arena hosting weekly LAN events.", "owner_id": None},
         ]
-        for v in venues:
-            v["venue_id"] = f"venue_{uuid.uuid4().hex[:10]}"
-            v["created_at"] = iso(now_utc())
-        await db.venues.insert_many(venues)
+            for v in venues:
+                v["venue_id"] = f"venue_{uuid.uuid4().hex[:10]}"
+                v["created_at"] = iso(now_utc())
+            await db.venues.insert_many(venues)
 
-    if await db.events.count_documents({}) == 0:
-        events = [
-            {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Pirates Cup BGMI Open 2025", "description": "₹1L prize pool, 64 squads, two-day LAN finals at Mumbai HQ.", "date": "2025-09-21", "location": "Mumbai HQ", "category": "tournament", "image": "https://images.pexels.com/photos/14266493/pexels-photo-14266493.jpeg", "highlights": ["64 teams", "₹1L prize", "Live cast"], "created_at": iso(now_utc())},
-            {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "College Clash — Valorant Cup", "description": "30+ colleges battled for the Pirates Gauntlet trophy.", "date": "2025-08-12", "location": "Pune", "category": "college", "image": "https://images.pexels.com/photos/9072386/pexels-photo-9072386.jpeg", "highlights": ["30 colleges", "Brand booths", "After-party"], "created_at": iso(now_utc())},
-            {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Night Turf Showdown", "description": "Friday-night 5-a-side league across 3 cities.", "date": "2025-07-04", "location": "Multi-city", "category": "social", "image": "https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", "highlights": ["48 teams", "DJ Night", "Drone shoot"], "created_at": iso(now_utc())},
-            {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Creator Meetup — Crew of the Coast", "description": "Top 50 creators, sponsor lounges, content workshops.", "date": "2025-10-05", "location": "Bangalore", "category": "gaming", "image": "https://images.pexels.com/photos/15864904/pexels-photo-15864904.jpeg", "highlights": ["50 creators", "Brand deals", "Reel station"], "created_at": iso(now_utc())},
-        ]
-        await db.events.insert_many(events)
+        if await db.events.count_documents({}) == 0:
+            events = [
+                {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Pirates Cup BGMI Open 2025", "description": "₹1L prize pool, 64 squads, two-day LAN finals at Mumbai HQ.", "date": "2025-09-21", "location": "Mumbai HQ", "category": "tournament", "image": "https://images.pexels.com/photos/14266493/pexels-photo-14266493.jpeg", "highlights": ["64 teams", "₹1L prize", "Live cast"], "created_at": iso(now_utc())},
+                {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "College Clash — Valorant Cup", "description": "30+ colleges battled for the Pirates Gauntlet trophy.", "date": "2025-08-12", "location": "Pune", "category": "college", "image": "https://images.pexels.com/photos/9072386/pexels-photo-9072386.jpeg", "highlights": ["30 colleges", "Brand booths", "After-party"], "created_at": iso(now_utc())},
+                {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Night Turf Showdown", "description": "Friday-night 5-a-side league across 3 cities.", "date": "2025-07-04", "location": "Multi-city", "category": "social", "image": "https://images.pexels.com/photos/399187/pexels-photo-399187.jpeg", "highlights": ["48 teams", "DJ Night", "Drone shoot"], "created_at": iso(now_utc())},
+                {"event_id": f"ev_{uuid.uuid4().hex[:10]}", "title": "Creator Meetup — Crew of the Coast", "description": "Top 50 creators, sponsor lounges, content workshops.", "date": "2025-10-05", "location": "Bangalore", "category": "gaming", "image": "https://images.pexels.com/photos/15864904/pexels-photo-15864904.jpeg", "highlights": ["50 creators", "Brand deals", "Reel station"], "created_at": iso(now_utc())},
+            ]
+            await db.events.insert_many(events)
 
-    if await db.creators.count_documents({}) == 0:
-        creators = [
-            {"name": "Aisha Verma", "handle": "@aishaplays", "avatar": "https://i.pravatar.cc/300?img=47", "bio": "BGMI streamer & sneaker head. 12k+ subs.", "category": "gamer", "engagement": 92, "consistency": 88, "quality": 94, "badges": ["Top 10", "Streak Master"]},
-            {"name": "Rohan Kapoor", "handle": "@rohankreels", "avatar": "https://i.pravatar.cc/300?img=12", "bio": "Football reels & turf vlogs across Mumbai.", "category": "creator", "engagement": 88, "consistency": 91, "quality": 86, "badges": ["Reel King"]},
-            {"name": "Tara Iyer", "handle": "@tara.iyer", "avatar": "https://i.pravatar.cc/300?img=32", "bio": "Model & pickleball ambassador. Pune.", "category": "model", "engagement": 95, "consistency": 79, "quality": 90, "badges": ["Face of August"]},
-            {"name": "Nikhil Shetty", "handle": "@nik.cuesports", "avatar": "https://i.pravatar.cc/300?img=15", "bio": "Pro 8-ball player. Daily trick shots.", "category": "creator", "engagement": 82, "consistency": 94, "quality": 88, "badges": ["Consistency"]},
-            {"name": "Maya D'Souza", "handle": "@mayasnaps", "avatar": "https://i.pravatar.cc/300?img=23", "bio": "Lifestyle x esports photog.", "category": "face", "engagement": 80, "consistency": 76, "quality": 96, "badges": ["Quality Pro"]},
-            {"name": "Arjun Mehta", "handle": "@arjun.valo", "avatar": "https://i.pravatar.cc/300?img=8", "bio": "Valorant duelist. Radiant rank, EU servers.", "category": "gamer", "engagement": 78, "consistency": 84, "quality": 82, "badges": ["Rising"]},
-        ]
-        for c in creators:
-            c["creator_id"] = f"cr_{uuid.uuid4().hex[:10]}"
-            c["points"] = int(c["engagement"] * 0.4 + c["consistency"] * 0.3 + c["quality"] * 0.3)
-            c["rank"] = 0
-            c["created_at"] = iso(now_utc())
-        await db.creators.insert_many(creators)
+        if await db.creators.count_documents({}) == 0:
+            creators = [
+                {"name": "Aisha Verma", "handle": "@aishaplays", "avatar": "https://i.pravatar.cc/300?img=47", "bio": "BGMI streamer & sneaker head. 12k+ subs.", "category": "gamer", "engagement": 92, "consistency": 88, "quality": 94, "badges": ["Top 10", "Streak Master"]},
+                {"name": "Rohan Kapoor", "handle": "@rohankreels", "avatar": "https://i.pravatar.cc/300?img=12", "bio": "Football reels & turf vlogs across Mumbai.", "category": "creator", "engagement": 88, "consistency": 91, "quality": 86, "badges": ["Reel King"]},
+                {"name": "Tara Iyer", "handle": "@tara.iyer", "avatar": "https://i.pravatar.cc/300?img=32", "bio": "Model & pickleball ambassador. Pune.", "category": "model", "engagement": 95, "consistency": 79, "quality": 90, "badges": ["Face of August"]},
+                {"name": "Nikhil Shetty", "handle": "@nik.cuesports", "avatar": "https://i.pravatar.cc/300?img=15", "bio": "Pro 8-ball player. Daily trick shots.", "category": "creator", "engagement": 82, "consistency": 94, "quality": 88, "badges": ["Consistency"]},
+                {"name": "Maya D'Souza", "handle": "@mayasnaps", "avatar": "https://i.pravatar.cc/300?img=23", "bio": "Lifestyle x esports photog.", "category": "face", "engagement": 80, "consistency": 76, "quality": 96, "badges": ["Quality Pro"]},
+                {"name": "Arjun Mehta", "handle": "@arjun.valo", "avatar": "https://i.pravatar.cc/300?img=8", "bio": "Valorant duelist. Radiant rank, EU servers.", "category": "gamer", "engagement": 78, "consistency": 84, "quality": 82, "badges": ["Rising"]},
+            ]
+            for c in creators:
+                c["creator_id"] = f"cr_{uuid.uuid4().hex[:10]}"
+                c["points"] = int(c["engagement"] * 0.4 + c["consistency"] * 0.3 + c["quality"] * 0.3)
+                c["rank"] = 0
+                c["created_at"] = iso(now_utc())
+            await db.creators.insert_many(creators)
+    except Exception as e:
+        logging.warning(f"Seed data failed (using mock DB?): {e}")
+        pass
 
 @app.on_event("startup")
 async def on_startup():
@@ -1245,3 +2035,85 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# ---------- Admin: Users ----------
+@api_router.get("/admin/users")
+async def list_users():
+    docs = await db.users.find({}, {"_id":0, "password_hash":0}).to_list(500)
+    return docs
+
+@api_router.put("/admin/users/{user_id}")
+async def edit_user(user_id: str, body: dict):
+    await db.users.update_one({"user_id": user_id}, {"$set": body})
+    return {"ok": True}
+
+@api_router.delete("/admin/users/{user_id}")
+async def delete_user(user_id: str):
+    await db.users.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+
+# ---------- Admin: Owners ----------
+@api_router.get("/admin/owners")
+async def list_owners():
+    docs = await db.users.find({"role":"owner"}, {"_id":0, "password_hash":0}).to_list(500)
+    return docs
+
+@api_router.put("/admin/owners/{owner_id}")
+async def edit_owner(owner_id: str, body: dict):
+    await db.users.update_one({"user_id": owner_id}, {"$set": body})
+    return {"ok": True}
+
+@api_router.delete("/admin/owners/{owner_id}")
+async def delete_owner(owner_id: str):
+    await db.users.delete_many({"user_id": owner_id})
+    return {"ok": True}
+
+@api_router.get("/owner/analytics/revenue")
+async def owner_revenue(user: User = Depends(require_user)):
+    venues = await db.venues.find({"owner_id": user.user_id}, {"_id": 0}).to_list(500)
+    bookings = await db.bookings.find({"venue_id": {"$in": [v["venue_id"] for v in venues]}}, {"_id": 0}).to_list(1000)
+    revenue_by_cat = {}
+    for v in venues:
+        cat = v.get("category", "other")
+        count = sum(1 for b in bookings if b["venue_id"] == v["venue_id"])
+        revenue_by_cat[cat] = revenue_by_cat.get(cat, 0) + (v["price_per_hour"] * count)
+    return [{"category": k, "revenue": v} for k, v in revenue_by_cat.items()]
+
+@api_router.get("/owner/analytics/badges")
+async def owner_badges(user: User = Depends(require_user)):
+    venues = await db.venues.find({"owner_id": user.user_id}, {"_id": 0}).to_list(500)
+    bookings = await db.bookings.find({"venue_id": {"$in": [v["venue_id"] for v in venues]}}, {"_id": 0}).to_list(1000)
+    # Top venue by revenue
+    top_venue = None
+    most_booked = None
+    if venues:
+        top_venue = max(venues, key=lambda v: sum(b["final_total"] for b in bookings if b["venue_id"] == v["venue_id"]))
+        most_booked = max(venues, key=lambda v: sum(1 for b in bookings if b["venue_id"] == v["venue_id"]))
+    return {
+        "top_venue": top_venue["name"] if top_venue else None,
+        "most_booked": most_booked["name"] if most_booked else None
+    }
+
+class SponsorIn(BaseModel):
+    name: str
+    phone: str
+    address: str
+    type: str  # cash / merch / passes
+
+@api_router.post("/owner/sponsors")
+async def sponsor_request(body: SponsorIn, user: User = Depends(require_user)):
+    doc = body.model_dump()
+    doc.update({
+        "sponsor_id": f"sp_{uuid.uuid4().hex[:10]}",
+        "owner_id": user.user_id,
+        "created_at": iso(now_utc())
+    })
+    await db.sponsors.insert_one(doc)
+    return {"ok": True, "sponsor": doc}
+
+
+
+
+
