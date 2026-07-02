@@ -230,3 +230,45 @@ class TestContact:
         })
         assert r.status_code == 200
         assert r.json()["ok"] is True
+
+
+class TestMerchCheckout:
+    def test_cart_checkout_and_admin_status_flow(self, session, user_auth):
+        r = session.get(f"{API}/merch", headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200
+        item = r.json()["items"][0]
+
+        r = session.post(f"{API}/merch/cart", json={
+            "item_id": item["id"],
+            "size": "M",
+            "color": "Black",
+            "quantity": 2,
+        }, headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200
+        cart = r.json()["cart"]
+        assert any(i["item_id"] == item["id"] for i in cart["items"])
+
+        r = session.post(f"{API}/merch/checkout", json={
+            "items": cart["items"],
+            "shipping_address": "123 Test Street",
+            "phone": "9999999999",
+            "email": user_auth["email"],
+            "payment_method": "cod",
+        }, headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200
+        order = r.json()["order"]
+        assert order["status"] == "pending"
+        assert order["payment_method"] == "cod"
+
+        r = session.get(f"{API}/me/merch/orders", headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200
+        assert any(o["order_id"] == order["order_id"] for o in r.json()["orders"])
+
+        admin_headers = {"X-Admin-Token": "pizo-admin-2026"}
+        r = session.get(f"{API}/admin/merch/orders", headers=admin_headers)
+        assert r.status_code == 200
+        assert any(o["order_id"] == order["order_id"] for o in r.json())
+
+        r = session.put(f"{API}/admin/merch/orders/{order['order_id']}", json={"status": "shipped"}, headers=admin_headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "shipped"

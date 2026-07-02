@@ -22,7 +22,7 @@ export default function Admin() {
   const [refunds, setRefunds] = useState([]);
 
   // form states
-  const [newMerch, setNewMerch] = useState({ name:"", price:"", image:"", category:"" });
+  const [newMerch, setNewMerch] = useState({ name:"", price:"", image:"", category:"", description:"", images:"", sizes:"", colors:"" });
   const [editMerch, setEditMerch] = useState(null);
 
   const [newPlan, setNewPlan] = useState({ plan_name:"", amount:"", benefits:"" });
@@ -41,6 +41,7 @@ export default function Admin() {
   const [refundModalOpen, setRefundModalOpen] = useState(false);
   const [refundModalBooking, setRefundModalBooking] = useState(null);
   const [rejectModalBooking, setRejectModalBooking] = useState(null);
+  const [merchOrders, setMerchOrders] = useState([]);
 
   const tryAuth = async (t) => {
     try {
@@ -59,6 +60,7 @@ export default function Admin() {
       setSponsorEvents((await api.get("/admin/sponsor-events",{headers:{"X-Admin-Token":t}})).data || []);
       setRefunds((await api.get("/admin/refunds",{headers:{"X-Admin-Token":t}})).data.refunds || []);
       setAdminMessages((await api.get("/admin/messages",{headers:{"X-Admin-Token":t}})).data || []);
+      setMerchOrders((await api.get("/admin/merch/orders",{headers:{"X-Admin-Token":t}})).data || []);
 
     } catch { toast.error("Invalid token"); setAuthed(false); }
   };
@@ -73,7 +75,7 @@ export default function Admin() {
   const deleteCreator = async (id) => { await api.delete(`/admin/creators/${id}`, { headers: { "X-Admin-Token": token } }); toast.success("Creator deleted"); tryAuth(token); };
 
   // Add/Edit functions
-  const addMerch = async () => { await api.post("/admin/merch", newMerch, { headers: { "X-Admin-Token": token } }); toast.success("Merch added"); setNewMerch({ name:"", price:"", image:"", category:"" }); tryAuth(token); };
+  const addMerch = async () => { await api.post("/admin/merch", newMerch, { headers: { "X-Admin-Token": token } }); toast.success("Merch added"); setNewMerch({ name:"", price:"", image:"", category:"", description:"", images:"", sizes:"", colors:"" }); tryAuth(token); };
   const updateMerch = async () => { await api.put(`/admin/merch/${editMerch.id}`, editMerch, { headers: { "X-Admin-Token": token } }); toast.success("Merch updated"); setEditMerch(null); tryAuth(token); };
 
   const addPlan = async () => { await api.post("/admin/plans", newPlan, { headers: { "X-Admin-Token": token } }); toast.success("Plan added"); setNewPlan({ plan_name:"", amount:"", benefits:"" }); tryAuth(token); };
@@ -122,7 +124,7 @@ export default function Admin() {
       <div className="flex gap-2 mt-8">
         {[
             ["venues","Venues"],["contacts","Contacts"],["users","Users"],["owners","Owners"],
-            ["merch","Merch"],["plans","Plans"],["events","Events"],["creators","Creators"],
+            ["merch","Merch"],["merchorders","Merch Orders"],["plans","Plans"],["events","Events"],["creators","Creators"],
             ["refunds","Refunds"],["sponsors","Sponsor Events"],["messages","Messages"]
         ].map(([v,l])=>(
           <button key={v} onClick={()=>setTab(v)} className={`text-xs px-4 py-2 rounded-full ${tab===v?"bg-[var(--pizo-coral)] text-white":"glass"}`}>{l}</button>
@@ -180,8 +182,12 @@ export default function Admin() {
           <div className="space-y-2">
             <input placeholder="Name" value={newMerch.name} onChange={e=>setNewMerch({...newMerch,name:e.target.value})}/>
             <input placeholder="Price" value={newMerch.price} onChange={e=>setNewMerch({...newMerch,price:e.target.value})}/>
-            <input placeholder="Image URL" value={newMerch.image} onChange={e=>setNewMerch({...newMerch,image:e.target.value})}/>
             <input placeholder="Category" value={newMerch.category} onChange={e=>setNewMerch({...newMerch,category:e.target.value})}/>
+            <textarea placeholder="Description" value={newMerch.description} onChange={e=>setNewMerch({...newMerch,description:e.target.value})} className="w-full min-h-[80px] bg-black/30 border border-white/10 rounded-xl p-3 text-sm" />
+            <input placeholder="Main image URL" value={newMerch.image} onChange={e=>setNewMerch({...newMerch,image:e.target.value})}/>
+            <input placeholder="Extra image URLs (comma separated)" value={newMerch.images} onChange={e=>setNewMerch({...newMerch,images:e.target.value})}/>
+            <input placeholder="Sizes (comma separated)" value={newMerch.sizes} onChange={e=>setNewMerch({...newMerch,sizes:e.target.value})}/>
+            <input placeholder="Colors (comma separated)" value={newMerch.colors} onChange={e=>setNewMerch({...newMerch,colors:e.target.value})}/>
             <button onClick={addMerch} className="btn-sm bg-green-500/15 text-green-300">Add Merch</button>
           </div>
 
@@ -201,11 +207,40 @@ export default function Admin() {
             <div className="space-y-2 mt-4">
               <input value={editMerch.name} onChange={e=>setEditMerch({...editMerch,name:e.target.value})}/>
               <input value={editMerch.price} onChange={e=>setEditMerch({...editMerch,price:e.target.value})}/>
-              <input value={editMerch.image} onChange={e=>setEditMerch({...editMerch,image:e.target.value})}/>
               <input value={editMerch.category} onChange={e=>setEditMerch({...editMerch,category:e.target.value})}/>
+              <textarea value={editMerch.description || ""} onChange={e=>setEditMerch({...editMerch,description:e.target.value})} className="w-full min-h-[80px] bg-black/30 border border-white/10 rounded-xl p-3 text-sm" />
+              <input value={editMerch.image || ""} onChange={e=>setEditMerch({...editMerch,image:e.target.value})}/>
+              <input value={(editMerch.images || []).join(",") || ""} onChange={e=>setEditMerch({...editMerch,images:e.target.value.split(",")})}/>
+              <input value={(editMerch.sizes || []).join(",") || ""} onChange={e=>setEditMerch({...editMerch,sizes:e.target.value.split(",")})}/>
+              <input value={(editMerch.colors || []).join(",") || ""} onChange={e=>setEditMerch({...editMerch,colors:e.target.value.split(",")})}/>
               <button onClick={updateMerch} className="btn-sm bg-green-500/15 text-green-300">Save</button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Merch Orders */}
+      {tab==="merchorders" && (
+        <div className="mt-6 space-y-4">
+          {merchOrders.map(order => (
+            <div key={order.order_id} className="glass rounded-2xl p-5">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="font-bold">{order.order_id}</div>
+                  <div className="text-xs text-zinc-400">{order.email} • {order.phone}</div>
+                  <div className="text-sm mt-1">{order.items?.map(i => `${i.name} × ${i.quantity}`).join(", ")}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-sm">Status: <span className="capitalize">{order.status}</span></div>
+                  <select value={order.status} onChange={async (e) => { try { const { data } = await api.put(`/admin/merch/orders/${order.order_id}`, { status: e.target.value }, { headers: { "X-Admin-Token": token } }); setMerchOrders(prev => prev.map(o => o.order_id === order.order_id ? data : o)); toast.success("Order updated"); } catch (err) { toast.error(err?.response?.data?.detail || "Update failed"); } }} className="bg-black/30 border border-white/10 rounded-xl px-3 py-2 text-sm">
+                    <option value="pending">Pending</option>
+                    <option value="shipped">Shipped</option>
+                    <option value="delivered">Delivered</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

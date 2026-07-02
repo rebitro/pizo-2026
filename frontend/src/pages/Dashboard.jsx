@@ -112,7 +112,8 @@ export default function Dashboard() {
             </div>
           )}
         </div>
-        <div className="mt-3 text-right">
+        <div className="mt-3 flex items-center justify-between">
+          <Link to="/merch" className="text-sm text-[var(--pizo-gold-soft)] underline">Open merch</Link>
           <Link to="/my-orders" className="text-sm text-[var(--pizo-gold-soft)] underline">My Orders</Link>
         </div>
       </div>

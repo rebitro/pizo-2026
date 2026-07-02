@@ -19,6 +19,8 @@ import StaffQR from "@/pages/StaffQR";
 import AuthCallback from "@/pages/AuthCallback";
 import FindPirate from "@/pages/FindPirate";
 import Merch from "@/pages/Merch";
+import ProductDetail from "@/pages/ProductDetail";
+import CartPage from "@/pages/Cart";
 import Admin from "@/pages/Admin";
 import MyOrders from "@/pages/MyOrders";
 
@@ -41,6 +43,8 @@ function AppRouter() {
         <Route path="/contact" element={<Contact />} />
         <Route path="/find-pirate" element={<FindPirate />} />
         <Route path="/merch" element={<Merch />} />
+        <Route path="/merch/:itemId" element={<ProductDetail />} />
+        <Route path="/cart" element={<CartPage />} />
         <Route path="/my-orders" element={<MyOrders />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/owner" element={<OwnerDashboard />} />

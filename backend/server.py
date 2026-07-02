@@ -932,6 +932,12 @@ async def create_booking_order(body: BookingOrderIn, user: User = Depends(requir
         "key_id": RAZORPAY_KEY_ID,
     }
 
+
+def require_admin(x_admin_token: str = Header(..., alias="X-Admin-Token")):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token required")
+    return True
+
 @api_router.post("/merch/purchase")
 async def purchase_merch(body: dict, user: User = Depends(require_user)):
     item_id = body.get("item_id")
@@ -963,10 +969,17 @@ async def purchase_merch(body: dict, user: User = Depends(require_user)):
         raise HTTPException(status_code=400, detail="Insufficient wallet balance for this item")
     raise HTTPException(status_code=400, detail="Use Razorpay checkout for merch purchase")
 
-@api_router.get("/me/merch/orders")
-async def my_merch_orders(user: User = Depends(require_user)):
-    orders = await db.merch_orders.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return {"orders": orders}
+@api_router.get("/admin/merch/orders")
+async def admin_merch_orders(_: bool = Depends(require_admin)):
+    return await db.merch_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+@api_router.put("/admin/merch/orders/{order_id}")
+async def admin_update_merch_order(order_id: str, body: dict, _: bool = Depends(require_admin)):
+    status = (body.get("status") or "pending").lower()
+    if status not in {"pending", "shipped", "delivered"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    await db.merch_orders.update_one({"order_id": order_id}, {"$set": {"status": status}})
+    return await db.merch_orders.find_one({"order_id": order_id}, {"_id": 0})
 
 @api_router.post("/bookings/{booking_id}/refund")
 async def refund_booking(booking_id: str, body: BookingRefundIn, user: User = Depends(require_user)):
@@ -1167,13 +1180,27 @@ async def register_event(event_id: str, user: User = Depends(require_user)):
 
 # ---------- Merch (Premium-only catalog) ----------
 MERCH = [
-    {"id":"m1","name":"Pirate Crew Tee","price":899,"image":"https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600","category":"tee"},
-    {"id":"m2","name":"Gold Anchor Cap","price":699,"image":"https://images.unsplash.com/photo-1588850561407-ed78c282e89b?w=600","category":"cap"},
-    {"id":"m3","name":"Captain Hoodie","price":1799,"image":"https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=600","category":"hoodie"},
-    {"id":"m4","name":"Skull Sticker Pack","price":199,"image":"https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=600","category":"sticker"},
-    {"id":"m5","name":"PIZO Tote Bag","price":499,"image":"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=600","category":"bag"},
-    {"id":"m6","name":"Crew Wristband","price":299,"image":"https://images.unsplash.com/photo-1622445275576-721325763afe?w=600","category":"accessory"},
+    {"id":"m1","name":"Pirate Crew Tee","price":899,"image":"https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600","category":"tee","description":"A premium cotton tee with bold pirate graphics for your everyday fit.","images":["https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600","https://images.unsplash.com/photo-1512436991641-6745cdb1723f?w=600"],"sizes":["S","M","L","XL"],"colors":["Black","White","Navy"],"details":[{"label":"Fabric","value":"100% cotton"},{"label":"Fit","value":"Relaxed regular fit"},{"label":"Care","value":"Machine wash cold"}],"color_images":{"Black":"https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600","White":"https://images.unsplash.com/photo-1512436991641-6745cdb1723f?w=600","Navy":"https://images.unsplash.com/photo-1496747611176-843222e1e57c?w=600"}},
+    {"id":"m2","name":"Gold Anchor Cap","price":699,"image":"https://images.unsplash.com/photo-1588850561407-ed78c282e89b?w=600","category":"cap","description":"Premium cap with embroidered anchor and adjustable fit.","images":["https://images.unsplash.com/photo-1588850561407-ed78c282e89b?w=600","https://images.unsplash.com/photo-1521369909024-2afc2965a2b8?w=600"],"sizes":["One Size"],"colors":["Black","Gold"],"details":[{"label":"Fabric","value":"Cotton twill"},{"label":"Structure","value":"Adjustable strap"},{"label":"Care","value":"Spot clean only"}],"color_images":{"Black":"https://images.unsplash.com/photo-1588850561407-ed78c282e89b?w=600","Gold":"https://images.unsplash.com/photo-1521369909024-2afc2965a2b8?w=600"}},
+    {"id":"m3","name":"Captain Hoodie","price":1799,"image":"https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=600","category":"hoodie","description":"Soft fleece hoodie built for chilly nights and crew meetups.","images":["https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=600","https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=600"],"sizes":["S","M","L","XL"],"colors":["Charcoal","Olive"],"details":[{"label":"Fabric","value":"Fleece lining"},{"label":"Fit","value":"Oversized street fit"},{"label":"Care","value":"Gentle machine wash"}],"color_images":{"Charcoal":"https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=600","Olive":"https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=600"}},
+    {"id":"m4","name":"Skull Sticker Pack","price":199,"image":"https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=600","category":"sticker","description":"Collectible sticker set for your gear and water bottles.","images":["https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=600"],"sizes":["Pack"],"colors":["Multi"],"details":[{"label":"Material","value":"Vinyl"},{"label":"Size","value":"3x3 inch each"},{"label":"Use","value":"Laptop, bottle, helmet"}],"color_images":{"Multi":"https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=600"}},
+    {"id":"m5","name":"PIZO Tote Bag","price":499,"image":"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=600","category":"bag","description":"Durable tote bag for your daily essentials and tournament days.","images":["https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=600","https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600"],"sizes":["Single"],"colors":["Black","Tan"],"details":[{"label":"Material","value":"Canvas"},{"label":"Finish","value":"Water-resistant"},{"label":"Use","value":"Gym, travel, everyday"}],"color_images":{"Black":"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=600","Tan":"https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600"}},
+    {"id":"m6","name":"Crew Wristband","price":299,"image":"https://images.unsplash.com/photo-1622445275576-721325763afe?w=600","category":"accessory","description":"Comfortable wristband with a premium feel and team-style finish.","images":["https://images.unsplash.com/photo-1622445275576-721325763afe?w=600"],"sizes":["Free Size"],"colors":["Red","Blue"],"details":[{"label":"Material","value":"Silicone"},{"label":"Style","value":"Stretch fit"},{"label":"Care","value":"Wipe clean"}],"color_images":{"Red":"https://images.unsplash.com/photo-1622445275576-721325763afe?w=600","Blue":"https://images.unsplash.com/photo-1517841905240-472988babdf9?w=600"}},
 ]
+
+def normalize_merch_item(item: dict, is_premium: bool = False) -> dict:
+    m2 = dict(item)
+    m2["images"] = item.get("images") or [item.get("image")]
+    m2["sizes"] = item.get("sizes") or []
+    m2["colors"] = item.get("colors") or []
+    m2["details"] = item.get("details") or []
+    m2["color_images"] = item.get("color_images") or {}
+    m2["description"] = item.get("description", "")
+    if is_premium:
+        m2["original_price"] = item["price"]
+        m2["price"] = int(item["price"] * 0.9)
+        m2["discount_pct"] = 10
+    return m2
 
 async def get_merch_price(user_doc: dict, item: dict) -> int:
     price = int(item["price"])
@@ -1188,28 +1215,183 @@ async def get_merch_price(user_doc: dict, item: dict) -> int:
 async def list_merch(user: User = Depends(require_user)):
     sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": {"$in": ["premium","family"]}})
     is_premium = bool(sub)
-    items = []
-    for m in MERCH:
-        m2 = dict(m)
-        if is_premium:
-            m2["original_price"] = m["price"]
-            m2["price"] = int(m["price"] * 0.9)
-            m2["discount_pct"] = 10
-        items.append(m2)
+    items = [normalize_merch_item(m, is_premium=is_premium) for m in MERCH]
     return {"is_premium": is_premium, "items": items}
 
+@api_router.get("/merch/{item_id}")
+async def get_merch_item(item_id: str, user: User = Depends(require_user)):
+    sub = await db.subscriptions.find_one({"user_id": user.user_id, "status": "active", "plan_id": {"$in": ["premium","family"]}})
+    item = next((m for m in MERCH if m["id"] == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Merch item not found")
+    return normalize_merch_item(item, is_premium=bool(sub))
+
+@api_router.post("/merch/cart")
+async def add_to_cart(body: dict, user: User = Depends(require_user)):
+    item_id = body.get("item_id")
+    if not item_id:
+        raise HTTPException(status_code=400, detail="item_id required")
+    found = next((m for m in MERCH if m["id"] == item_id), None)
+    if not found:
+        raise HTTPException(status_code=404, detail="Merch item not found")
+    size = body.get("size") or (found.get("sizes") or [""])[0]
+    color = body.get("color") or (found.get("colors") or [""])[0]
+    qty = max(1, int(body.get("quantity", 1) or 1))
+    cart_doc = await db.user_carts.find_one({"user_id": user.user_id}, {"_id": 0})
+    items = list(cart_doc.get("items", [])) if cart_doc else []
+    existing = next((i for i in items if i.get("item_id") == item_id and i.get("size") == size and i.get("color") == color), None)
+    if existing:
+        existing["quantity"] = int(existing.get("quantity", 1)) + qty
+    else:
+        items.append({"item_id": item_id, "name": found["name"], "size": size, "color": color, "quantity": qty, "price": int(found["price"]), "image": found.get("image")})
+    await db.user_carts.update_one({"user_id": user.user_id}, {"$set": {"items": items, "updated_at": iso(now_utc())}}, upsert=True)
+    await db.user_chest.update_one(
+        {"user_id": user.user_id, "item_id": item_id},
+        {"$setOnInsert": {"user_id": user.user_id, "item_id": item_id, "name": found["name"], "image": found.get("image"), "description": found.get("description", ""), "added_at": iso(now_utc())}},
+        upsert=True,
+    )
+    total_items = sum(int(i.get("quantity", 0)) for i in items)
+    return {"ok": True, "cart": {"items": items, "item_count": total_items}}
+
+@api_router.get("/me/merch/cart")
+async def my_merch_cart(user: User = Depends(require_user)):
+    cart_doc = await db.user_carts.find_one({"user_id": user.user_id}, {"_id": 0})
+    items = list(cart_doc.get("items", [])) if cart_doc else []
+    total_items = sum(int(i.get("quantity", 0)) for i in items)
+    return {"items": items, "item_count": total_items}
+
+@api_router.delete("/me/merch/cart")
+async def remove_from_merch_cart(item_id: str, size: Optional[str] = None, color: Optional[str] = None, user: User = Depends(require_user)):
+    cart_doc = await db.user_carts.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not cart_doc:
+        return {"ok": True, "cart": {"items": [], "item_count": 0}}
+    items = list(cart_doc.get("items", []))
+    filtered = [
+        item for item in items
+        if not (
+            item.get("item_id") == item_id
+            and (size is None or item.get("size") == size)
+            and (color is None or item.get("color") == color)
+        )
+    ]
+    await db.user_carts.update_one({"user_id": user.user_id}, {"$set": {"items": filtered, "updated_at": iso(now_utc())}}, upsert=True)
+    total_items = sum(int(i.get("quantity", 0)) for i in filtered)
+    return {"ok": True, "cart": {"items": filtered, "item_count": total_items}}
+
+@api_router.get("/me/chest")
+async def my_chest(user: User = Depends(require_user)):
+    docs = await db.user_chest.find({"user_id": user.user_id}, {"_id": 0}).sort("added_at", -1).to_list(100)
+    return {"items": docs, "item_count": len(docs)}
+
+@api_router.post("/merch/checkout")
+async def checkout_merch(body: dict, user: User = Depends(require_user)):
+    try:
+        items_payload = body.get("items") or []
+        if not items_payload:
+            raise HTTPException(status_code=400, detail="Cart is empty")
+        user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+        order_items = []
+        subtotal = 0
+        for entry in items_payload:
+            item_id = entry.get("item_id")
+            found = next((m for m in MERCH if m["id"] == item_id), None)
+            if not found:
+                raise HTTPException(status_code=404, detail=f"Merch item {item_id} not found")
+            price = await get_merch_price(user_doc, found)
+            qty = max(1, int(entry.get("quantity", 1) or 1))
+            line_total = price * qty
+            subtotal += line_total
+            order_items.append({
+                "item_id": item_id,
+                "name": found["name"],
+                "size": entry.get("size") or (found.get("sizes") or [""])[0],
+                "color": entry.get("color") or (found.get("colors") or [""])[0],
+                "quantity": qty,
+                "unit_price": price,
+                "line_total": line_total,
+                "image": found.get("image"),
+            })
+        payment_method = (body.get("payment_method") or "cod").lower()
+        order_doc = {
+            "order_id": f"mo_{uuid.uuid4().hex[:10]}",
+            "user_id": user.user_id,
+            "items": order_items,
+            "subtotal": subtotal,
+            "name": body.get("name") or user.name,
+            "shipping_address": body.get("shipping_address", ""),
+            "phone": body.get("phone", ""),
+            "email": body.get("email") or user.email,
+            "payment_method": payment_method,
+            "payment_type": payment_method if payment_method != "cod" else "cod",
+            "status": "pending",
+            "refund_status": "none",
+            "refund_mode": None,
+            "refund_amount": 0,
+            "created_at": iso(now_utc()),
+        }
+        await db.merch_orders.insert_one(order_doc)
+        order_doc.pop("_id", None)
+        await db.user_carts.update_one({"user_id": user.user_id}, {"$set": {"items": [], "updated_at": iso(now_utc())}}, upsert=True)
+        return {"ok": True, "order": order_doc}
+    except Exception as exc:
+        logger.exception("Merch checkout failed")
+        return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
 
 @api_router.post("/merch/add")
 async def add_to_chest(body: dict, user: User = Depends(require_user)):
     item_id = body.get("item_id")
     if not item_id:
         raise HTTPException(status_code=400, detail="item_id required")
-    # verify exists
     found = next((m for m in MERCH if m["id"] == item_id), None)
     if not found:
         raise HTTPException(status_code=404, detail="Merch item not found")
     await db.user_chest.insert_one({"user_id": user.user_id, "item_id": item_id, "added_at": iso(now_utc())})
     return {"ok": True}
+
+@api_router.get("/me/merch/orders")
+async def my_merch_orders(user: User = Depends(require_user)):
+    orders = await db.merch_orders.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {"orders": orders}
+
+@api_router.put("/me/merch/orders/{order_id}")
+async def update_my_merch_order(order_id: str, body: dict, user: User = Depends(require_user)):
+    allowed_fields = {"name": body.get("name"), "phone": body.get("phone"), "shipping_address": body.get("shipping_address"), "email": body.get("email")}
+    updates = {k: v for k, v in allowed_fields.items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    result = await db.merch_orders.update_one({"order_id": order_id, "user_id": user.user_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = await db.merch_orders.find_one({"order_id": order_id, "user_id": user.user_id}, {"_id": 0})
+    return {"ok": True, "order": order}
+
+@api_router.post("/me/merch/orders/{order_id}/cancel")
+async def cancel_my_merch_order(order_id: str, body: dict, user: User = Depends(require_user)):
+    order = await db.merch_orders.find_one({"order_id": order_id, "user_id": user.user_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"cancelled", "refunded", "refund_pending"}:
+        return {"ok": True, "order": order}
+    refund_mode = (body.get("refund_mode") or "wallet").lower()
+    if refund_mode not in {"wallet", "upi"}:
+        raise HTTPException(status_code=400, detail="Refund mode must be wallet or upi")
+    refund_amount = int(order.get("subtotal") or order.get("amount") or 0)
+    update = {
+        "refund_mode": refund_mode,
+        "refund_requested_at": iso(now_utc()),
+        "refund_requested_reason": body.get("reason", ""),
+        "upi_id": body.get("upi_id", ""),
+    }
+    if refund_mode == "wallet":
+        await credit_wallet(user.user_id, refund_amount, f"Refund for merch order {order_id}")
+        update.update({"status": "refunded", "refund_status": "refunded", "refund_amount": refund_amount, "refund_processed_at": iso(now_utc())})
+        await send_notification(user.user_id, None, "Refund Completed", f"₹{refund_amount} refunded to your wallet for order {order_id}.")
+    else:
+        update.update({"status": "refund_pending", "refund_status": "pending", "refund_amount": refund_amount})
+        await send_notification(user.user_id, None, "Refund Requested", f"UPI refund request for order {order_id} has been submitted. The amount will be added to your wallet in 1-2 working days.")
+    await db.merch_orders.update_one({"order_id": order_id, "user_id": user.user_id}, {"$set": update})
+    refreshed = await db.merch_orders.find_one({"order_id": order_id, "user_id": user.user_id}, {"_id": 0})
+    return {"ok": True, "order": refreshed}
 
 class CreatorJoinIn(BaseModel):
     name: str
@@ -1550,12 +1732,22 @@ async def admin_merch(_: bool = Depends(require_admin)):
 @api_router.post("/admin/merch")
 async def admin_add_merch(body: dict, _: bool = Depends(require_admin)):
     global MERCH
+    def parse_list(value):
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return []
     new_item = {
         "id": f"m{uuid.uuid4().hex[:6]}",
         "name": body["name"],
         "price": body["price"],
-        "image": body["image"],
-        "category": body.get("category","misc")
+        "image": body.get("image") or (body.get("images") or [""])[0],
+        "category": body.get("category", "misc"),
+        "description": body.get("description", ""),
+        "images": parse_list(body.get("images") or body.get("image")),
+        "sizes": parse_list(body.get("sizes")),
+        "colors": parse_list(body.get("colors")),
     }
     MERCH.append(new_item)
     return new_item
@@ -1563,9 +1755,25 @@ async def admin_add_merch(body: dict, _: bool = Depends(require_admin)):
 @api_router.put("/admin/merch/{id}")
 async def admin_update_merch(id: str, body: dict, _: bool = Depends(require_admin)):
     global MERCH
+    def parse_list(value):
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return []
     for m in MERCH:
         if m["id"] == id:
-            m.update(body)
+            if "images" in body or "image" in body:
+                m["images"] = parse_list(body.get("images") or body.get("image"))
+            if "sizes" in body:
+                m["sizes"] = parse_list(body.get("sizes"))
+            if "colors" in body:
+                m["colors"] = parse_list(body.get("colors"))
+            if "description" in body:
+                m["description"] = body.get("description", "")
+            if "image" in body:
+                m["image"] = body.get("image") or (m.get("images") or [""])[0]
+            m.update({k: v for k, v in body.items() if k not in {"images", "sizes", "colors", "description", "image"}})
             return m
     raise HTTPException(404, "Merch not found")
 
@@ -1794,19 +2002,44 @@ async def verify_rzp_payment(body: RzpVerifyIn, user: User = Depends(require_use
     elif body.purpose == "merch_purchase":
         if not body.purchase_payload:
             raise HTTPException(status_code=400, detail="Purchase payload required")
-        item_id = body.purchase_payload.get("item_id")
-        if not item_id:
-            raise HTTPException(status_code=400, detail="Item ID required")
-        item = next((m for m in MERCH if m["id"] == item_id), None)
-        if not item:
-            raise HTTPException(status_code=404, detail="Merch item not found")
-        price = await get_merch_price(user.model_dump(), item) if isinstance(user, User) else item["price"]
+        purchase = body.purchase_payload or {}
+        entries = purchase.get("items") or []
+        if not entries:
+            item_id = purchase.get("item_id")
+            if not item_id:
+                raise HTTPException(status_code=400, detail="Item ID required")
+            entries = [{"item_id": item_id, "size": purchase.get("size"), "color": purchase.get("color"), "quantity": purchase.get("quantity", 1)}]
+        order_items = []
+        subtotal = 0
+        for entry in entries:
+            item_id = entry.get("item_id")
+            item = next((m for m in MERCH if m["id"] == item_id), None)
+            if not item:
+                raise HTTPException(status_code=404, detail="Merch item not found")
+            price = await get_merch_price(user.model_dump(), item) if isinstance(user, User) else item["price"]
+            qty = max(1, int(entry.get("quantity", 1) or 1))
+            line_total = price * qty
+            subtotal += line_total
+            order_items.append({
+                "item_id": item_id,
+                "name": item["name"],
+                "size": entry.get("size") or (item.get("sizes") or [""])[0],
+                "color": entry.get("color") or (item.get("colors") or [""])[0],
+                "quantity": qty,
+                "unit_price": price,
+                "line_total": line_total,
+                "image": item.get("image"),
+            })
         order_doc = {
             "order_id": f"mo_{uuid.uuid4().hex[:10]}",
             "user_id": user.user_id,
-            "item_id": item_id,
-            "item_name": item["name"],
-            "amount": price,
+            "items": order_items,
+            "subtotal": subtotal,
+            "shipping_address": purchase.get("shipping_address", ""),
+            "phone": purchase.get("phone", ""),
+            "email": purchase.get("email") or user.email,
+            "payment_method": (purchase.get("payment_method") or "razorpay").lower(),
+            "amount": subtotal,
             "payment_type": "razorpay",
             "payment_id": body.razorpay_payment_id,
             "order_reference_id": body.razorpay_order_id,
@@ -1814,7 +2047,7 @@ async def verify_rzp_payment(body: RzpVerifyIn, user: User = Depends(require_use
             "created_at": iso(now_utc()),
         }
         await db.merch_orders.insert_one(order_doc)
-        await send_notification(user.user_id, None, "Merch purchase confirmed", f"You bought {item['name']} for ₹{price}.")
+        await send_notification(user.user_id, None, "Merch purchase confirmed", f"You bought {len(order_items)} merch item(s) for ₹{subtotal}.")
         return {"ok": True, "order": order_doc}
     elif body.purpose == "wallet_topup":
         # Credit user's wallet with the amount recorded in rzp_orders
