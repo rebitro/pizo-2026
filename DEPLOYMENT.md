@@ -134,8 +134,10 @@ JWT_SECRET=<generate-random-secret-key>
 
 # Razorpay (get from https://dashboard.razorpay.com)
 # Test mode (development):
-RAZORPAY_KEY_ID=rzp_test_T5NYMLhEo1ovmZ
-RAZORPAY_KEY_SECRET=e0mit0qzM2uhcDLtNYmgEPw9
+RAZORPAY_KEY_ID=your_live_razorpay_key_id
+RAZORPAY_KEY_SECRET=your_live_razorpay_key_secret
+JWT_SECRET=your_long_random_secret
+ADMIN_TOKEN=your_secure_admin_token
 
 # Production: Use live keys
 # RAZORPAY_KEY_ID=rzp_live_xxxxx

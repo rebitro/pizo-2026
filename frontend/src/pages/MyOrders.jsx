@@ -75,7 +75,12 @@ export default function MyOrders() {
                 <div className="text-sm text-zinc-400">Recipient: {o.name || '—'}</div>
                 <div className="text-sm text-zinc-400">Address: {o.shipping_address || '—'}</div>
                 {o.refund_status && o.refund_status !== 'none' && (
-                  <div className="text-xs mt-2 text-amber-300">Refund: {o.refund_status} {o.refund_mode ? `• ${o.refund_mode}` : ''}</div>
+                  <div className="text-xs mt-2 text-amber-300">
+                    Refund: {o.refund_status}
+                    {o.refund_mode ? ` • ${o.refund_mode}` : ''}
+                    {o.upi_id ? ` • UPI: ${o.upi_id}` : ''}
+                    {o.refund_status === 'pending' ? ' • Amount will be added to your wallet in 1-2 working days.' : ''}
+                  </div>
                 )}
                 {editingOrderId === o.order_id ? (
                   <div className="mt-3 grid gap-2 md:grid-cols-2">

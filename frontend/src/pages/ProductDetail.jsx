@@ -99,40 +99,49 @@ export default function ProductDetail() {
     }
     try {
       setIsPaying(true);
+      const checkoutPayload = {
+        items: [{ item_id: item.id, size: selectedSize, color: selectedColor, quantity }],
+        name: recipientName,
+        shipping_address: shippingAddress,
+        phone,
+        email,
+        payment_method: paymentMethod,
+      };
       if (paymentMethod !== "cod") {
-        const { payload } = await startRazorpayCheckout({
-          amount: item.price * quantity,
-          purpose: "merch_purchase",
-          purchase_payload: {
-            item_id: item.id,
-            size: selectedSize,
-            color: selectedColor,
-            quantity,
-            shipping_address: shippingAddress,
-            phone,
+        try {
+          const { payload } = await startRazorpayCheckout({
+            amount: item.price * quantity,
+            purpose: "merch_purchase",
+            purchase_payload: {
+              ...checkoutPayload,
+              item_id: item.id,
+              size: selectedSize,
+              color: selectedColor,
+              quantity,
+            },
+            name: user.name,
             email,
-            payment_method: paymentMethod,
-          },
-          name: user.name,
-          email,
-          description: `Purchase ${item.name}`,
-        });
-        if (payload?.order) {
-          setOrderPlaced(payload.order);
-          toast.success("Order placed successfully");
+            description: `Purchase ${item.name}`,
+          });
+          if (payload?.order) {
+            setOrderPlaced(payload.order);
+            toast.success("Order placed successfully");
+          }
+        } catch (err) {
+          if (err?.message?.includes('not configured') || err?.message?.includes('unavailable')) {
+            const { data } = await api.post("/merch/checkout", { ...checkoutPayload, payment_method: "cod" });
+            setOrderPlaced(data.order);
+            toast.success("Order placed successfully via COD");
+          } else {
+            throw err;
+          }
         }
       } else {
-        const { data } = await api.post("/merch/checkout", {
-          items: [{ item_id: item.id, size: selectedSize, color: selectedColor, quantity }],
-          name: recipientName,
-          shipping_address: shippingAddress,
-          phone,
-          email,
-          payment_method: paymentMethod,
-        });
+        const { data } = await api.post("/merch/checkout", checkoutPayload);
         setOrderPlaced(data.order);
         toast.success("Order placed successfully");
       }
+      navigate("/my-orders");
     } catch (e) {
       if (e?.message !== "Payment cancelled") {
         toast.error(e?.response?.data?.detail || e?.message || "Could not place order");

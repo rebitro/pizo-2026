@@ -1,5 +1,5 @@
 // Razorpay checkout loader + helper
-import { api } from "@/lib/api";
+import { api, LOGO_URL } from "@/lib/api";
 
 const RZP_SCRIPT = "https://checkout.razorpay.com/v1/checkout.js";
 
@@ -46,6 +46,11 @@ export async function startRazorpayCheckout({ amount, purpose, plan_id, purchase
     notes: { description: description || purpose },
   });
 
+  if (!order?.order_id || !order?.key_id) {
+    const detail = order?.detail || "Payment provider is unavailable right now.";
+    throw new Error(detail);
+  }
+
   return new Promise((resolve, reject) => {
     const rzp = new window.Razorpay({
       key: order.key_id,
@@ -54,7 +59,7 @@ export async function startRazorpayCheckout({ amount, purpose, plan_id, purchase
       order_id: order.order_id,
       name: "PIZO • Pirates of Play",
       description: description || (purpose === "subscription" ? "Pirate Pass" : "Owner Onboarding"),
-      image: "https://customer-assets.emergentagent.com/job_5138dde7-fb31-42b6-b878-d3f8be1c4d5f/artifacts/xbraui72_517247711_17859671220445839_4953795569973148132_n.jpg",
+      image: LOGO_URL,
       prefill: { name: name || order.name, email: email || order.email },
       theme: { color: theme, backdrop_color: "#070707" },
       modal: {

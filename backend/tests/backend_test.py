@@ -1,11 +1,18 @@
 """PIZO backend API tests - covers auth, venues, bookings, subs, creators, events, contact."""
 import os
 import uuid
+from pathlib import Path
+
 import pytest
 import requests
+from dotenv import load_dotenv
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://pizo-venue-hub.preview.emergentagent.com").rstrip("/")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT_DIR / ".env")
+
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 API = f"{BASE_URL}/api"
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 
 # ---------- Fixtures ----------
@@ -39,6 +46,10 @@ def owner_auth(session):
     })
     assert r.status_code == 200, r.text
     data = r.json()
+    # ensure owner is onboarded for tests (pay onboarding fee)
+    headers = {"Authorization": f"Bearer {data['token']}", "Content-Type": "application/json"}
+    r2 = session.post(f"{API}/owners/onboard", json={"upi_id": "test@upi"}, headers=headers)
+    assert r2.status_code == 200, r2.text
     return {"token": data["token"], "user": data["user"]}
 
 
@@ -175,13 +186,39 @@ class TestVenues:
 
 # ---------- Bookings ----------
 class TestBookings:
+    def test_booking_quote_returns_discount_breakdown(self, session, user_auth):
+        venues = session.get(f"{API}/venues").json()
+        vid = venues[0]["venue_id"]
+        r = session.post(f"{API}/bookings/quote", json={
+            "venue_id": vid,
+            "date": "2026-02-01",
+            "slot": "6:00 PM - 7:00 PM",
+            "num_players": 2,
+            "coupons": []
+        }, headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert "base_price" in data
+        assert "final_total" in data
+        assert "discount_pct" in data
+        assert "applied_coupons" in data
+
     def test_create_booking_and_list(self, session, user_auth):
         venues = session.get(f"{API}/venues").json()
         vid = venues[0]["venue_id"]
-        r = session.post(f"{API}/bookings", json={
-            "venue_id": vid, "date": "2026-02-01", "slot": "6:00 PM - 7:00 PM"
-        }, headers=auth_headers(user_auth["token"]))
-        assert r.status_code == 200, r.text
+        # include a test payment_id so booking proceeds in test environment
+        slots_to_try = [
+            "6:00 PM - 7:00 PM", "7:00 PM - 8:00 PM", "8:00 PM - 9:00 PM", "5:00 PM - 6:00 PM",
+            "9:00 PM - 10:00 PM", "4:00 PM - 5:00 PM"
+        ]
+        r = None
+        for slot in slots_to_try:
+            r = session.post(f"{API}/bookings", json={
+                "venue_id": vid, "date": "2026-02-01", "slot": slot, "payment_id": "TESTPAY"
+            }, headers=auth_headers(user_auth["token"]))
+            if r.status_code == 200:
+                break
+        assert r is not None and r.status_code == 200, r.text
         bk = r.json()
         assert bk["status"] == "confirmed"
         assert bk["venue_name"] == venues[0]["name"]
@@ -220,6 +257,45 @@ class TestSubscriptions:
             "plan_id": "bogus", "upi_id": "x@upi"
         }, headers=auth_headers(user_auth["token"]))
         assert r.status_code == 400
+
+
+# ---------- Reviews ----------
+class TestReviews:
+    def test_submit_and_fetch_reviews_for_venue(self, session, user_auth):
+        venues = session.get(f"{API}/venues").json()
+        vid = venues[0]["venue_id"]
+        r = session.post(f"{API}/reviews", json={
+            "target_type": "venue",
+            "target_id": vid,
+            "rating": 5,
+            "comment": "Great venue"
+        }, headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["rating"] == 5
+        r2 = session.get(f"{API}/reviews/venue/{vid}")
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["review_count"] >= 1
+        assert data["average_rating"] >= 4
+
+    def test_submit_and_fetch_reviews_for_creator(self, session, user_auth):
+        creators = session.get(f"{API}/creators").json()
+        cid = creators[0]["creator_id"]
+        r = session.post(f"{API}/reviews", json={
+            "target_type": "creator",
+            "target_id": cid,
+            "rating": 4,
+            "comment": "Great creator"
+        }, headers=auth_headers(user_auth["token"]))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["rating"] == 4
+        r2 = session.get(f"{API}/reviews/creator/{cid}")
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["review_count"] >= 1
+        assert data["average_rating"] >= 4
 
 
 # ---------- Contact ----------
@@ -264,7 +340,7 @@ class TestMerchCheckout:
         assert r.status_code == 200
         assert any(o["order_id"] == order["order_id"] for o in r.json()["orders"])
 
-        admin_headers = {"X-Admin-Token": "pizo-admin-2026"}
+        admin_headers = {"X-Admin-Token": ADMIN_TOKEN}
         r = session.get(f"{API}/admin/merch/orders", headers=admin_headers)
         assert r.status_code == 200
         assert any(o["order_id"] == order["order_id"] for o in r.json())

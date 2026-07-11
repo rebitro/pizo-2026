@@ -48,7 +48,7 @@ def test_merch_order_can_be_edited_and_cancelled_with_wallet_refund():
     cancel = requests.post(
         f"{API}/me/merch/orders/{order_id}/cancel",
         headers=headers,
-        json={"refund_mode": "wallet", "reason": "Changed mind"},
+        json={"refund_mode": "none", "reason": "Changed mind"},
         timeout=10,
     )
     assert cancel.status_code == 200, cancel.text

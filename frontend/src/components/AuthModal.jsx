@@ -8,7 +8,7 @@ import { LOGO_URL } from "@/lib/api";
 export default function AuthModal({ open, onClose }) {
   const { loginEmail, registerEmail } = useAuth();
   const [mode, setMode] = useState("login");
-  const [form, setForm] = useState({ name: "", email: "", password: "", role: "user" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "user", referral: "" });
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async (e) => {
@@ -19,7 +19,7 @@ export default function AuthModal({ open, onClose }) {
         await loginEmail(form.email, form.password);
         toast.success("Welcome back, pirate!");
       } else {
-        await registerEmail(form.name, form.email, form.password, form.role);
+        await registerEmail(form.name, form.email, form.password, form.role, form.referral || null);
         toast.success("Welcome aboard the crew!");
       }
       onClose();
@@ -88,6 +88,17 @@ export default function AuthModal({ open, onClose }) {
                       {r.l}
                     </button>
                   ))}
+                </div>
+              )}
+              {mode === "register" && (
+                <div>
+                  <div className="text-xs text-zinc-400 mb-2">Have a referral code? (optional)</div>
+                  <div className="flex items-center gap-2 bg-black/40 border border-white/10 rounded-xl px-3 focus-within:border-[var(--pizo-coral)] transition">
+                    <span className="text-zinc-500"><svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2L2 7l10 5 10-5-10-5zm0 7.2L4.2 7 12 4.8 19.8 7 12 9.2zM2 17l10 5 10-5v-2l-10 5-10-5v2z"/></svg></span>
+                    <input type="text" placeholder="Referral code (optional)" value={form.referral}
+                      onChange={(e)=>setForm({...form, referral: e.target.value})}
+                      className="flex-1 bg-transparent py-3 text-sm text-white placeholder:text-zinc-500 outline-none" />
+                  </div>
                 </div>
               )}
               <button type="submit" disabled={loading}

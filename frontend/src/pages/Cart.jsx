@@ -49,25 +49,40 @@ export default function CartPage() {
     try {
       setPlacing(true);
       if (paymentMethod !== "cod") {
-        await startRazorpayCheckout({
-          amount: subtotal,
-          purpose: "merch_purchase",
-          purchase_payload: {
-            items: items.map((item) => ({
-              item_id: item.item_id,
-              size: item.size,
-              color: item.color,
-              quantity: item.quantity,
-            })),
-            shipping_address: shippingAddress,
-            phone,
+        try {
+          await startRazorpayCheckout({
+            amount: subtotal,
+            purpose: "merch_purchase",
+            purchase_payload: {
+              items: items.map((item) => ({
+                item_id: item.item_id,
+                size: item.size,
+                color: item.color,
+                quantity: item.quantity,
+              })),
+              shipping_address: shippingAddress,
+              phone,
+              email,
+              payment_method: paymentMethod,
+            },
+            name: user.name,
             email,
-            payment_method: paymentMethod,
-          },
-          name: user.name,
-          email,
-          description: "Merch purchase from cart",
-        });
+            description: "Merch purchase from cart",
+          });
+        } catch (err) {
+          if (err?.message?.includes('not configured') || err?.message?.includes('unavailable')) {
+            await api.post("/merch/checkout", {
+              items: items.map((item) => ({ item_id: item.item_id, size: item.size, color: item.color, quantity: item.quantity })),
+              name: recipientName,
+              shipping_address: shippingAddress,
+              phone,
+              email,
+              payment_method: "cod",
+            });
+          } else {
+            throw err;
+          }
+        }
       } else {
         await api.post("/merch/checkout", {
           items: items.map((item) => ({ item_id: item.item_id, size: item.size, color: item.color, quantity: item.quantity })),

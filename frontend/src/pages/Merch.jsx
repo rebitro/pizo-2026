@@ -72,33 +72,39 @@ export default function Merch() {
     }
     try {
       setProcessing(selectedItem.id);
+      const checkoutPayload = {
+        items: [{ item_id: selectedItem.id, size: selectedSize, color: selectedColor, quantity }],
+        name: recipientName,
+        shipping_address: shippingAddress,
+        phone,
+        email,
+        payment_method: paymentMethod,
+      };
       if (paymentMethod !== "cod") {
-        await startRazorpayCheckout({
-          amount: selectedItem.price * quantity,
-          purpose: 'merch_purchase',
-          purchase_payload: {
-            item_id: selectedItem.id,
-            size: selectedSize,
-            color: selectedColor,
-            quantity,
-            shipping_address: shippingAddress,
-            phone,
+        try {
+          await startRazorpayCheckout({
+            amount: selectedItem.price * quantity,
+            purpose: 'merch_purchase',
+            purchase_payload: {
+              ...checkoutPayload,
+              item_id: selectedItem.id,
+              size: selectedSize,
+              color: selectedColor,
+              quantity,
+            },
+            name: user.name,
             email,
-            payment_method: paymentMethod,
-          },
-          name: user.name,
-          email,
-          description: `Purchase ${selectedItem.name}`,
-        });
+            description: `Purchase ${selectedItem.name}`,
+          });
+        } catch (err) {
+          if (err?.message?.includes('not configured') || err?.message?.includes('unavailable')) {
+            await api.post('/merch/checkout', { ...checkoutPayload, payment_method: 'cod' });
+          } else {
+            throw err;
+          }
+        }
       } else {
-        await api.post('/merch/checkout', {
-          items: [{ item_id: selectedItem.id, size: selectedSize, color: selectedColor, quantity }],
-          name: recipientName,
-          shipping_address: shippingAddress,
-          phone,
-          email,
-          payment_method: paymentMethod,
-        });
+        await api.post('/merch/checkout', checkoutPayload);
       }
       toast.success('Order placed successfully');
       setReadyBuy(false);

@@ -14,4 +14,20 @@ api.interceptors.request.use((cfg) => {
   return cfg;
 });
 
-export const LOGO_URL = "https://customer-assets.emergentagent.com/job_5138dde7-fb31-42b6-b878-d3f8be1c4d5f/artifacts/xbraui72_517247711_17859671220445839_4953795569973148132_n.jpg";
+// Notify frontend when responses include wallet balance info
+api.interceptors.response.use((resp) => {
+  try {
+    const data = resp && resp.data;
+    let wallet = null;
+    if (data && typeof data === 'object') {
+      if (typeof data.wallet_balance !== 'undefined') wallet = data.wallet_balance;
+      else if (data.user && typeof data.user.wallet_balance !== 'undefined') wallet = data.user.wallet_balance;
+    }
+    if (wallet !== null) {
+      try { window.dispatchEvent(new CustomEvent('pizo:wallet_update', { detail: { wallet_balance: wallet } })); } catch (e) {}
+    }
+  } catch (e) {}
+  return resp;
+}, (err) => Promise.reject(err));
+
+export const LOGO_URL = "/images/pizo-pirate-logo.jpg";

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, MapPin, Trophy, Star, Anchor, Crown, Award, Gift, Sparkles, Copy, Video, Eye, Plus, Trash2, Instagram, Youtube, TrendingUp } from "lucide-react";
@@ -8,13 +8,17 @@ import { startRazorpayCheckout } from "@/lib/razorpay";
 import { api } from "@/lib/api";
 
 export default function Dashboard() {
-  const { user, loading, checkAuth } = useAuth();
+  const { user, loading, checkAuth, setUser } = useAuth();
   const [bookings, setBookings] = useState([]);
+  const [eventRegs, setEventRegs] = useState([]);
   const [subs, setSubs] = useState([]);
   const [scratches, setScratches] = useState([]);
   const [revealed, setRevealed] = useState(null);
   const [creator, setCreator] = useState(null);
   const [chest, setChest] = useState([]);
+  const [wishlist, setWishlist] = useState([]);
+  const [uploadingPic, setUploadingPic] = useState(false);
+  const fileInputRef = useRef(null);
 
   const loadAll = () => {
     api.get("/bookings/me").then(r=>setBookings(r.data)).catch(()=>{});
@@ -22,6 +26,8 @@ export default function Dashboard() {
     api.get("/scratch/me").then(r=>setScratches(r.data)).catch(()=>{});
     api.get("/creators/me").then(r => setCreator(r.data.joined ? r.data : null)).catch(()=>setCreator(null));
     api.get("/auth/me").then(r=>{ /* refresh user */ }).catch(()=>{});
+    api.get('/me/event-registrations').then(r=>setEventRegs(r.data)).catch(()=>setEventRegs([]));
+    api.get('/wishlist').then(r=>setWishlist(r.data.wishlist || [])).catch(()=>setWishlist([]));
   };
   useEffect(() => { if (user) loadAll(); }, [user]);
   useEffect(() => {
@@ -38,6 +44,30 @@ export default function Dashboard() {
   const nextMilestone = Math.ceil((count+1)/5)*5;
   const toGo = nextMilestone - count;
   const progressPct = ((count % 5) / 5) * 100;
+
+  const uploadProfileImage = async (file) => {
+    if (!file) return;
+    setUploadingPic(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const upload = await api.post("/uploads/image", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const { url } = upload.data;
+      const updated = await api.put("/auth/me", { picture: url });
+      setUser(updated.data);
+      toast.success("Profile image updated!");
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploadingPic(false);
+    }
+  };
+
+  const triggerProfileUpload = () => {
+    fileInputRef.current?.click();
+  };
 
   const reveal = async (code) => {
     try {
@@ -57,20 +87,43 @@ export default function Dashboard() {
     <main className="pt-32 pb-24 px-6 max-w-7xl mx-auto" data-testid="user-dashboard">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
-          {user.picture ? (
-            <img src={user.picture} className="w-16 h-16 rounded-full ring-2 ring-[var(--pizo-gold)] object-cover" alt={user.name}/>
-          ) : (
-            <div className="w-16 h-16 rounded-full bg-[var(--pizo-coral)]/20 ring-2 ring-[var(--pizo-gold)] flex items-center justify-center font-bebas text-2xl gold-text">{user.name?.[0] || "P"}</div>
-          )}
+          <div className="relative">
+            {user.picture ? (
+              <img src={user.picture} className="w-16 h-16 rounded-full ring-2 ring-[var(--pizo-gold)] object-cover" alt={user.name}/>
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-[var(--pizo-coral)]/20 ring-2 ring-[var(--pizo-gold)] flex items-center justify-center font-bebas text-2xl gold-text">{user.name?.[0] || "P"}</div>
+            )}
+            <button type="button" onClick={triggerProfileUpload}
+              className="absolute -bottom-2 right-0 h-8 w-8 rounded-full bg-[var(--pizo-coral)] text-black flex items-center justify-center border border-white/10 shadow-lg hover:bg-[var(--pizo-gold)] transition"
+              disabled={uploadingPic} data-testid="profile-upload-button">
+              {uploadingPic ? "..." : "+"}
+            </button>
+          </div>
           <div>
             <div className="text-[10px] tracking-[0.35em] text-[var(--pizo-gold-soft)]">CAPTAIN'S DECK</div>
             <h1 className="font-display text-3xl md:text-4xl font-black">Ahoy, {user.name?.split(" ")[0]}</h1>
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) uploadProfileImage(file);
+              e.target.value = "";
+            }}
+          />
         </div>
         <div className="flex items-center gap-3">
           <div className="text-xs text-zinc-400">Wallet</div>
           <div className="font-bebas text-2xl gold-text">₹{(user?.wallet_balance || 0)}</div>
           <AddCoinsButton user={user} checkAuth={checkAuth} loadAll={loadAll} />
+        </div>
+        <div className="ml-4 glass rounded-full px-4 py-2 flex items-center gap-3">
+          <div className="text-sm">Refer & Earn</div>
+          <div className="px-3 py-1 rounded-full bg-[var(--pizo-gold)]/10 border border-[var(--pizo-gold)]/30 text-[var(--pizo-gold-soft)] text-xs font-mono">{user?.referral_code}</div>
+          <button onClick={() => { const link = `${window.location.origin}${window.location.pathname}?ref=${user?.referral_code}`; navigator.clipboard.writeText(link); toast.success('Referral link copied'); }} className="btn-sm glass">Share</button>
         </div>
         {!activeSub ? (
           <Link to="/plans" className="px-5 py-2.5 rounded-full bg-[var(--pizo-coral)] text-white font-bold text-sm coral-glow" data-testid="dashboard-upgrade-button">Activate a Pass</Link>
@@ -79,6 +132,33 @@ export default function Dashboard() {
             <Crown size={14}/> Upgrade to Premium
           </Link>
         )}
+      </div>
+      <div className="mt-6 glass rounded-3xl p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] tracking-[0.3em] text-[var(--pizo-gold-soft)]">MY WISHLIST</div>
+            <div className="font-display text-xl mt-1">Saved venues</div>
+          </div>
+          <div className="text-sm text-zinc-400">{wishlist.length} saved</div>
+        </div>
+        <div className="mt-4">
+          {wishlist.length === 0 ? <div className="text-sm text-zinc-400">No saved venues yet.</div> : (
+            <div className="space-y-2">
+              {wishlist.map(v => (
+                <div key={v.venue_id} className="flex items-center justify-between glass-strong rounded-2xl p-3">
+                  <div>
+                    <div className="font-semibold">{v.name}</div>
+                    <div className="text-xs text-zinc-400">{v.city} • ₹{v.price_per_hour}/hr</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={async ()=>{ try { await api.delete(`/wishlist/venue/${v.venue_id}`); toast.success('Removed'); loadAll(); } catch { toast.error('Remove failed'); } }} className="btn-sm glass">Remove</button>
+                    <a href={`/venues/${v.venue_id}`} className="btn-sm px-4 py-2 rounded-full bg-[var(--pizo-coral)] text-white">View</a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Progress to next scratch */}
@@ -151,6 +231,29 @@ export default function Dashboard() {
         <StatCard label="BOOKINGS" value={count} icon={<Calendar/>}/>
         <StatCard label="ACTIVE PLAN" value={activeSub?.plan_name || "None"} icon={<Crown/>}/>
         <StatCard label="POINTS" value={count * 50} icon={<Star/>}/>
+      </div>
+
+      <div className="mt-6 glass rounded-3xl p-6">
+        <div className="text-[10px] tracking-[0.3em] text-[var(--pizo-gold-soft)]">MY EVENT REGISTRATIONS</div>
+        <div className="mt-4 space-y-3">
+          {eventRegs.length === 0 ? <div className="text-sm text-zinc-400">No event registrations yet.</div> : (
+            eventRegs.map(r => (
+              <div key={r.reg_id} className="flex items-center justify-between glass-strong rounded-2xl p-4">
+                <div>
+                  <div className="font-display text-lg font-bold">{r.event_id}</div>
+                  <div className="text-xs text-zinc-400">{r.user_name || r.guest_name} • {r.email || r.guest_email || ''}</div>
+                  {r.amount && <div className="text-xs mt-2">Paid: ₹{r.amount} • Status: {r.status || r.refund_status || 'paid'}</div>}
+                </div>
+                <div className="flex flex-col items-end gap-2">
+                  {r.status !== 'cancelled' && r.refund_status !== 'pending' && (
+                    <button onClick={async ()=>{ if (!window.confirm('Cancel registration?')) return; try { const { data } = await api.post(`/event-registrations/${r.reg_id}/cancel`); toast.success('Cancellation requested'); loadAll(); } catch (e) { toast.error(e?.response?.data?.detail || 'Cancel failed'); } }} className="btn-sm bg-amber-500/10 text-amber-300">Cancel</button>
+                  )}
+                  <div className="text-xs text-zinc-400">{new Date(r.created_at).toLocaleString?.() || r.created_at}</div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       <div className="grid md:grid-cols-3 gap-5 mt-6">
@@ -432,12 +535,18 @@ function RefundButton({ booking, onDone }) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState('wallet');
   const [reason, setReason] = useState('');
+  const [upiId, setUpiId] = useState('');
   const [loading, setLoading] = useState(false);
   const submit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await api.post(`/bookings/${booking.booking_id}/refund`, { mode, reason });
+      if (mode === 'upi' && (!upiId || !upiId.trim())) {
+        toast.error('Enter UPI id for UPI refunds');
+        setLoading(false);
+        return;
+      }
+      await api.post(`/bookings/${booking.booking_id}/refund`, { mode, reason, upi_id: upiId });
       toast.success(mode === 'wallet' ? 'Refund credited to wallet' : 'Refund requested (UPI)');
       onDone && onDone();
       setOpen(false);
@@ -458,6 +567,13 @@ function RefundButton({ booking, onDone }) {
                 <option value="wallet">Wallet (instant)</option>
                 <option value="upi">UPI (1-2 working days)</option>
               </select>
+              {mode === 'upi' && (
+                <>
+                  <label className="text-xs">UPI ID</label>
+                  <input value={upiId} onChange={e=>setUpiId(e.target.value)} placeholder="captain@bank"
+                    className="p-2 rounded bg-black/40" />
+                </>
+              )}
               <label className="text-xs">Reason (optional)</label>
               <input value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason" className="p-2 rounded bg-black/40" />
               <div className="flex gap-2 mt-3">

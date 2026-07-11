@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Anchor, Compass, ArrowRight, Sparkles, Trophy, ShieldCheck, Zap, MapPin, Crown, ArrowUpDown } from "lucide-react";
 import { api, LOGO_URL } from "@/lib/api";
+import ReferCard from "@/components/ReferCard";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
 const fullUrl = (u) => (u && u.startsWith("/api/") ? `${BACKEND_URL}${u}` : u);
@@ -182,6 +183,9 @@ export default function Home() {
       </section>
 
       {/* CTA */}
+      <section className="px-6 py-12 max-w-7xl mx-auto">
+        <ReferCard />
+      </section>
       <section className="px-6 py-24 max-w-7xl mx-auto">
         <div className="relative rounded-[2rem] overflow-hidden glass-strong p-10 md:p-16 grain">
           <div className="absolute -top-10 -right-10 w-72 h-72 bg-[var(--pizo-coral)]/30 rounded-full blur-3xl"/>
