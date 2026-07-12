@@ -15,8 +15,12 @@ import hmac
 import hashlib
 import razorpay
 from pathlib import Path
-from google.cloud import storage
-from google.oauth2 import service_account
+try:
+    from google.cloud import storage
+    from google.oauth2 import service_account
+except ImportError:
+    storage = None
+    service_account = None
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Annotated
 from datetime import datetime, timezone, timedelta
@@ -3340,7 +3344,7 @@ GCS_PUBLIC_URL_PREFIX = os.environ.get("GCS_PUBLIC_URL_PREFIX", "").strip()
 
 
 def _get_gcs_client():
-    if not GCS_BUCKET_NAME or not GCS_SERVICE_ACCOUNT_JSON:
+    if not GCS_BUCKET_NAME or not GCS_SERVICE_ACCOUNT_JSON or not storage or not service_account:
         return None
     try:
         credentials = service_account.Credentials.from_service_account_file(GCS_SERVICE_ACCOUNT_JSON)
@@ -3351,16 +3355,25 @@ def _get_gcs_client():
 
 
 async def _upload_to_gcs(file_name: str, data: bytes):
+    if not storage or not service_account:
+        return None
     client = _get_gcs_client()
     if not client:
         return None
     bucket = client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob(file_name)
     blob.upload_from_string(data, content_type="application/octet-stream")
-    blob.make_public()
     if GCS_PUBLIC_URL_PREFIX:
         return f"{GCS_PUBLIC_URL_PREFIX.rstrip('/')}/{file_name}"
-    return blob.public_url
+    try:
+        blob.make_public()
+        return blob.public_url
+    except Exception:
+        try:
+            return blob.generate_signed_url(expiration=timedelta(days=7), version="v4")
+        except Exception as exc:
+            logger.warning(f"Unable to generate public or signed URL for GCS object: {exc}")
+            raise HTTPException(500, "Uploaded to GCS but could not generate URL")
 
 
 @api_router.post("/uploads/image")
