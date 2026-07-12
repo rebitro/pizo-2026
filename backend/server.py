@@ -3598,10 +3598,15 @@ app.include_router(api_router)
 # Static file serving for uploads (under /api/uploads to match ingress)
 app.mount("/api/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
+cors_origins = [origin.strip() for origin in os.environ.get('CORS_ORIGINS', '').split(',') if origin.strip()]
+if not cors_origins:
+    cors_origins = ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=cors_origins,
+    allow_origin_regex=r"https://.*\.netlify\.app|https://.*\.netlify\.com|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )
