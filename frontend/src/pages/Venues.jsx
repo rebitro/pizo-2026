@@ -57,7 +57,7 @@ export default function Venues() {
         if (slots.length && !slots.includes(slot)) setSlot(slots[0]);
       })
       .catch(()=>setBookedSlots([]));
-  }, [book, date]);
+  }, [book, date, slot]);
 
   // Poll availability while booking modal is open so owner toggles reflect quickly
   useEffect(() => {
@@ -98,15 +98,15 @@ export default function Venues() {
         .finally(() => setQuoteLoading(false));
     }, 220);
     return () => clearTimeout(timeout);
-  }, [book?.venue_id, date, slot, numPlayers, coupon1, useWallet, user]);
+  }, [book, date, slot, numPlayers, coupon1, useWallet, user]);
 
-  const load = async () => {
+  const load = React.useCallback(async () => {
     const params = { sort };
     if (cat !== "all") params.category = cat;
     if (city !== "all") params.city = city;
     const { data } = await api.get("/venues", { params });
     setVenues(data);
-  };
+  }, [cat, city, sort]);
 
   function fireConfetti() {
     try {
@@ -228,7 +228,7 @@ export default function Venues() {
       toast.error(err?.response?.data?.detail || 'Wishlist update failed');
     }
   };
-  useEffect(() => { load(); }, [cat, city, sort]);
+  useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
     try {

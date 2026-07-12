@@ -17,11 +17,11 @@ export default function FindPirate() {
   const [contact, setContact] = useState("");
   const [form, setForm] = useState({ sport:"Turf 5v5", location:"", price_per_player:200, date:new Date(Date.now()+86400000).toISOString().slice(0,10), time:"7:00 PM", players_needed:2, note:"" });
 
-  const load = () => {
+  const load = React.useCallback(() => {
     api.get("/pirates/alerts").then(r => setAlerts(r.data)).catch(()=>{});
     if (user) api.get("/pirates/my-alerts").then(r => setMine(r.data)).catch(()=>{});
-  };
-  useEffect(() => { load(); }, [user]);
+  }, [user]);
+  useEffect(() => { load(); }, [load]);
 
   const post = async (e) => {
     e.preventDefault();

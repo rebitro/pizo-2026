@@ -13,7 +13,7 @@ export default function MyOrders() {
   const [refundMode, setRefundMode] = useState("wallet");
   const [upiId, setUpiId] = useState("");
 
-  const loadOrders = async () => {
+  const loadOrders = React.useCallback(async () => {
     if (!user) return;
     try {
       const { data } = await api.get('/me/merch/orders');
@@ -21,9 +21,9 @@ export default function MyOrders() {
     } catch {
       setOrders([]);
     }
-  };
+  }, [user]);
 
-  useEffect(()=>{ if (!user) return; loadOrders(); }, [user]);
+  useEffect(()=>{ if (!user) return; loadOrders(); }, [user, loadOrders]);
 
   const startEdit = (order) => {
     setEditingOrderId(order.order_id);

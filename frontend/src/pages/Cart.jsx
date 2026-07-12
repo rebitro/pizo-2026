@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ShoppingBag, CreditCard } from "lucide-react";
 import { toast } from "sonner";
@@ -17,12 +17,7 @@ export default function CartPage() {
   const [paymentMethod, setPaymentMethod] = useState("cod");
   const [placing, setPlacing] = useState(false);
 
-  useEffect(() => {
-    if (!user) return;
-    loadCart();
-  }, [user]);
-
-  const loadCart = async () => {
+  const loadCart = useCallback(async () => {
     try {
       const { data } = await api.get("/me/merch/cart");
       setItems(data.items || []);
@@ -31,7 +26,12 @@ export default function CartPage() {
     } catch {
       setItems([]);
     }
-  };
+  }, [user, recipientName, email]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadCart();
+  }, [user, loadCart]);
 
   const subtotal = useMemo(() => items.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0), [items]);
 

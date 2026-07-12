@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Lock } from "lucide-react";
 import { toast } from "sonner";
@@ -158,7 +158,7 @@ export default function Admin() {
     }
   };
 
-  const tryAuth = async (t) => {
+  const tryAuth = useCallback(async (t) => {
     try {
       const { data } = await api.get("/admin/overview", { headers: { "X-Admin-Token": t } });
       setOverview(data); setAuthed(true); localStorage.setItem("pizo_admin", t);
@@ -183,8 +183,8 @@ export default function Admin() {
       setEventRegistrations(Array.isArray(regResp) ? regResp : (regResp?.registrations || []));
 
     } catch { toast.error("Invalid token"); setAuthed(false); }
-  };
-  useEffect(() => { if (token) tryAuth(token); }, []);
+  }, []);
+  useEffect(() => { if (token) tryAuth(token); }, [token, tryAuth]);
 
   // Helper functions (Delete)
   const deleteUser = async (id) => { await api.delete(`/admin/users/${id}`, { headers: { "X-Admin-Token": token } }); toast.success("User deleted"); tryAuth(token); };
