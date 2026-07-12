@@ -1,10 +1,7 @@
 import axios from "axios";
 
-const DEFAULT_BACKEND_URL = process.env.NODE_ENV === "production"
-  ? "https://pizo-2026-1.onrender.com"
-  : "";
-const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, "");
-export const API = BACKEND_URL ? `${BACKEND_URL}/api` : "/api";
+const BACKEND_URL = "https://pizo-2026-1.onrender.com";
+export const API = `${BACKEND_URL}/api`;
 
 export const api = axios.create({
   baseURL: API,
